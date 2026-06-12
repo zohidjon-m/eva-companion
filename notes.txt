@@ -1,0 +1,17 @@
+we need to build new implementation plan
+gemma4 e2b QAT
+
+
+#UI
+make it more cute UI like cute rabbit or cat like the one koreans like.
+or personlize it according to who uses like 3 or 4 different UI for cute to more masculine ones
+
+
+#Memory
+manimcha boshida, userdan so'rash kere qanaqa bad habitlar, muammolaring bor deb. 
+Va uni user.md yoki .txt faylda saqlimiza, keyinchalik user journaling qilganda yangi muammolarni aniqlab qoshamiza
+manimcha user confirm qilgandan keyin. va usha muammoni keltirib chiqarish sabablarini organish
+
+#Behavioral analysis
+deepen engagement -> explore deeply
+emotion acceptance
