@@ -1,0 +1,192 @@
+/* =============================================================================
+   Eva — Design Tokens (the ONE file)
+   -----------------------------------------------------------------------------
+   Every color, font, space, radius, shadow and timing the app uses lives here
+   as a CSS custom property. Components never hard-code a value; they reference a
+   token. Changing the look of the whole product happens in this file alone.
+
+   Two tiers:
+     1. PRIMITIVES  — raw palette + scales. Never used directly by components.
+     2. SEMANTIC    — role-based aliases (bg, text, accent…). These are what
+        components consume, and they are what the dark theme re-points.
+
+   Privacy note: fonts are the Apple-system stack (New York / SF). We never load
+   a web font over the network — that would be an outbound call, which Eva's
+   privacy law forbids. New York (ui-serif) gives the warm, editorial feel; SF
+   (system-ui) carries the UI text.
+   ========================================================================== */
+
+:root {
+  /* --- 1. PRIMITIVES ----------------------------------------------------- */
+
+  /* Warm neutral ramp — paper & ink, never a cold pure gray. */
+  --c-sand-50: #faf7f2;
+  --c-sand-100: #f3ede3;
+  --c-sand-200: #e7ddcd;
+  --c-sand-300: #d6c8b2;
+  --c-sand-400: #b0a08a;
+  --c-sand-500: #8a7a64;
+  --c-sand-600: #6e6052;
+  --c-sand-700: #524739;
+  --c-sand-800: #36302a;
+  --c-sand-900: #24201c;
+  --c-sand-950: #181512;
+
+  /* Moss — Eva's signature accent. Calm, grounded, not corporate-blue. */
+  --c-moss-100: #dfeae2;
+  --c-moss-200: #b9d3c2;
+  --c-moss-300: #8fb6a0;
+  --c-moss-400: #5f9078;
+  --c-moss-500: #44715d;
+  --c-moss-600: #345747;
+  --c-moss-700: #284536;
+
+  /* Amber — secondary warmth, used sparingly for highlights & "on". */
+  --c-amber-300: #f0c984;
+  --c-amber-400: #e6ad55;
+  --c-amber-500: #cf8f33;
+
+  /* Functional hues (status). Desaturated to sit calmly on warm paper. */
+  --c-green: #4e9b6b;
+  --c-red: #d4584e;
+  --c-amber-status: #d99a2b;
+
+  /* --- Type families ----------------------------------------------------- */
+  --font-display: ui-serif, "New York", "Iowan Old Style", Georgia, "Times New Roman", serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "SF Pro Text",
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* --- Type scale (1.25 minor-third) ------------------------------------- */
+  --text-xs: 0.75rem; /* 12 */
+  --text-sm: 0.8125rem; /* 13 */
+  --text-base: 0.9375rem; /* 15 — UI default, easy on the eyes */
+  --text-md: 1.0625rem; /* 17 */
+  --text-lg: 1.375rem; /* 22 */
+  --text-xl: 1.75rem; /* 28 */
+  --text-2xl: 2.25rem; /* 36 */
+  --text-3xl: 3rem; /* 48 */
+
+  --leading-tight: 1.15;
+  --leading-snug: 1.35;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.7;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;
+  --tracking-caps: 0.09em;
+
+  /* --- Spacing scale (4px base) ------------------------------------------ */
+  --space-0: 0;
+  --space-1: 0.25rem; /* 4  */
+  --space-2: 0.5rem; /* 8  */
+  --space-3: 0.75rem; /* 12 */
+  --space-4: 1rem; /* 16 */
+  --space-5: 1.5rem; /* 24 */
+  --space-6: 2rem; /* 32 */
+  --space-7: 3rem; /* 48 */
+  --space-8: 4rem; /* 64 */
+  --space-9: 6rem; /* 96 */
+
+  /* --- Radii -------------------------------------------------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-xl: 28px;
+  --radius-full: 999px;
+
+  /* --- Layout constants -------------------------------------------------- */
+  --sidebar-w: 248px;
+  --topbar-h: 60px;
+  --content-max: 860px;
+
+  /* --- Motion ------------------------------------------------------------ */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 360ms;
+
+  /* --- 2. SEMANTIC (light theme = default) ------------------------------- */
+
+  /* Surfaces, layered back-to-front. */
+  --bg: var(--c-sand-50);
+  --bg-tint: #f5efe5; /* faint wash behind the canvas for depth */
+  --surface: #fffdfa;
+  --surface-raised: #ffffff;
+  --surface-sunken: var(--c-sand-100);
+  --surface-hover: rgba(68, 113, 93, 0.06);
+
+  /* Ink. */
+  --text: var(--c-sand-900);
+  --text-secondary: var(--c-sand-700);
+  --text-muted: var(--c-sand-500);
+  --text-on-accent: #ffffff;
+
+  /* Lines & separators. */
+  --border: rgba(82, 71, 57, 0.14);
+  --border-strong: rgba(82, 71, 57, 0.24);
+  --ring: rgba(68, 113, 93, 0.45); /* focus ring */
+
+  /* Accent roles. */
+  --accent: var(--c-moss-500);
+  --accent-hover: var(--c-moss-600);
+  --accent-soft: var(--c-moss-100);
+  --accent-contrast: var(--c-moss-700);
+  --highlight: var(--c-amber-400);
+
+  /* Status. */
+  --ok: var(--c-green);
+  --warn: var(--c-amber-status);
+  --danger: var(--c-red);
+
+  /* Shadows — warm-tinted, soft, layered. */
+  --shadow-xs: 0 1px 2px rgba(46, 39, 30, 0.06);
+  --shadow-sm: 0 2px 6px rgba(46, 39, 30, 0.07);
+  --shadow-md: 0 6px 20px rgba(46, 39, 30, 0.09), 0 1px 3px rgba(46, 39, 30, 0.06);
+  --shadow-lg: 0 18px 48px rgba(46, 39, 30, 0.14), 0 4px 12px rgba(46, 39, 30, 0.08);
+
+  color-scheme: light;
+}
+
+/* --- Dark theme — "dusk": warm charcoal, never blue-black ----------------- */
+:root[data-theme="dark"] {
+  --bg: var(--c-sand-950);
+  --bg-tint: #1d1814;
+  --surface: #211c17;
+  --surface-raised: #2a241e;
+  --surface-sunken: #15120f;
+  --surface-hover: rgba(143, 182, 160, 0.08);
+
+  --text: #ece5d9;
+  --text-secondary: #c4b9a8;
+  --text-muted: #8d8170;
+  --text-on-accent: #14130f;
+
+  --border: rgba(236, 229, 217, 0.1);
+  --border-strong: rgba(236, 229, 217, 0.18);
+  --ring: rgba(143, 182, 160, 0.55);
+
+  --accent: var(--c-moss-300);
+  --accent-hover: var(--c-moss-200);
+  --accent-soft: rgba(143, 182, 160, 0.14);
+  --accent-contrast: var(--c-moss-200);
+  --highlight: var(--c-amber-300);
+
+  --ok: #6fc08c;
+  --warn: var(--c-amber-300);
+  --danger: #e07a70;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.45);
+
+  color-scheme: dark;
+}

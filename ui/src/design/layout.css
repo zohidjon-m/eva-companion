@@ -1,0 +1,316 @@
+/* =============================================================================
+   Eva — Layout & shell chrome
+   The app frame: sidebar, top bar, content column, and the bits that live in
+   them (brand, nav, persona menu, status dot, icon button).
+   ========================================================================== */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  height: 100%;
+}
+
+/* --- Sidebar -------------------------------------------------------------- */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5) var(--space-4);
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-6);
+}
+.brand__mark {
+  display: inline-flex;
+}
+.brand__name {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-tight);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-3);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  text-align: left;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.nav__item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.nav__item--active {
+  background: var(--accent-soft);
+  color: var(--accent-contrast);
+}
+.nav__icon {
+  flex: none;
+  opacity: 0.9;
+}
+.nav__item--active .nav__icon {
+  opacity: 1;
+}
+/* The moss accent bar that marks the active section. */
+.nav__bar {
+  position: absolute;
+  left: calc(-1 * var(--space-4));
+  top: 50%;
+  width: 3px;
+  height: 0;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  transform: translateY(-50%);
+  transition: height var(--dur-base) var(--ease-out);
+}
+.nav__item--active .nav__bar {
+  height: 22px;
+}
+
+.sidebar__foot {
+  margin-top: auto;
+  padding: var(--space-4) var(--space-2) var(--space-1);
+}
+.sidebar__tag {
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  color: var(--text-muted);
+}
+
+/* --- Main column ---------------------------------------------------------- */
+.app__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0; /* let the column shrink instead of overflowing */
+  height: 100%;
+}
+
+/* --- Top bar -------------------------------------------------------------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  height: var(--topbar-h);
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  backdrop-filter: blur(8px);
+}
+.topbar__left,
+.topbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.topbar__conn {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-full);
+  flex: none;
+}
+.conn-dot--online {
+  background: var(--ok);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent);
+}
+.conn-dot--offline {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 20%, transparent);
+}
+.conn-dot--connecting {
+  background: var(--warn);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 22%, transparent);
+  animation: pulse 1.6s var(--ease-in-out) infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* --- Icon button (theme toggle, future toolbar actions) ------------------- */
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* --- Persona selector ----------------------------------------------------- */
+.persona {
+  position: relative;
+}
+.persona__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.persona__trigger:hover {
+  border-color: var(--accent);
+}
+.persona__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+.persona__chev {
+  color: var(--text-muted);
+}
+.persona__menu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 20;
+  width: 248px;
+  margin: 0;
+  padding: var(--space-2);
+  list-style: none;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  animation: rise var(--dur-base) var(--ease-out) both;
+}
+.persona__option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+}
+.persona__option:hover {
+  background: var(--surface-hover);
+}
+.persona__option--active {
+  background: var(--accent-soft);
+}
+.persona__option-name {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--text);
+}
+.persona__option-hint {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* --- Content column ------------------------------------------------------- */
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-7) var(--space-6) var(--space-8);
+}
+.content__inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+}
+.page-head {
+  margin-bottom: var(--space-6);
+}
+.page-head__title {
+  font-size: var(--text-2xl);
+}
+.page-head__blurb {
+  margin-top: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+}
+
+/* A whisper of motion when switching sections (keyed on the active id). */
+.content {
+  animation: fade var(--dur-base) var(--ease-out);
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* --- Responsive: hold up in a small window -------------------------------- */
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: 72px 1fr;
+  }
+  .brand__name,
+  .nav__label,
+  .sidebar__foot,
+  .topbar__conn {
+    display: none;
+  }
+  .sidebar {
+    padding: var(--space-5) var(--space-2);
+    align-items: center;
+  }
+  .brand {
+    padding: var(--space-2) 0 var(--space-5);
+  }
+  .nav__item {
+    justify-content: center;
+    padding: var(--space-3);
+  }
+  .nav__bar {
+    left: calc(-1 * var(--space-2));
+  }
+  .content {
+    padding: var(--space-5) var(--space-4) var(--space-7);
+  }
+  .topbar {
+    padding: 0 var(--space-4);
+  }
+}
