@@ -156,8 +156,283 @@ The piece that most needs careful, explicit design is the **L3 update algorithm*
 - the exact **operation grammar** the model is allowed to emit (`add` / `strengthen` / `weaken` / `note-contradiction` / `mark-resolved` / `link-evidence`), and
 - the deterministic **apply + decay + contradiction-resolution** logic that turns those operations into a coherent, current profile without ever letting the model rewrite the whole thing.
 
-That, plus the concrete SQLite schema for L0/L1 (so capture is locked before reasoning is built on top of it), is the right next design step.
+That, plus the concrete SQLite schema for L0/L1 (so capture is locked before reasoning is built on top of it), is the right next design step — and both are now specified in Section 7 below.
 
 ---
 
-*This is a living document. The layers and the "what must be considered most" rules are the stable contract; the schemas and algorithms beneath them will be filled in as we build.*
+*This is a living document. Section 7 schemas are locked contracts; all other sections remain refinable as building progresses.*
+
+---
+
+## 7. Concrete schemas (locked before Phase 2 starts)
+
+> These are source-of-truth contracts. Every component that reads or writes storage must implement these exactly. Changing any schema requires bumping the schema version and writing a migration.
+
+### 7.1 L1 SQLite schema (`schema.sql`)
+
+```sql
+-- schema.sql — applied once on first launch via db.py
+-- Increment PRAGMA user_version on every schema change; add a migration block in db.py.
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+-- PRAGMA user_version = 1;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- L0 index (truth lives in Markdown files; this table is the queryable index)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS entries (
+    id          TEXT PRIMARY KEY,                        -- UUID v4
+    date        TEXT NOT NULL,                           -- YYYY-MM-DD
+    type        TEXT NOT NULL CHECK(type IN ('chat','journal')),
+    text        TEXT NOT NULL,                           -- full turn/entry text
+    word_count  INTEGER,
+    is_seeded   INTEGER NOT NULL DEFAULT 0,              -- 1 = demo seed data; exclude from recall
+    created_at  TEXT NOT NULL                            -- ISO-8601
+);
+
+-- Full-text search over raw entry text
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+    text,
+    content='entries',
+    content_rowid='rowid'
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- L1 extractions — one row per entry; ALL fields the model must pull out
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS extractions (
+    id                  TEXT PRIMARY KEY,
+    entry_id            TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    extraction_status   TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(extraction_status IN ('pending','done','failed','null_stored')),
+    -- Mood scalar and emotion array
+    mood                INTEGER,           -- -5..+5; NULL if extraction failed
+    emotions            TEXT,              -- JSON: [{name, intensity: 0..1}]
+    -- Structured facts (all JSON; NULL until extraction succeeds)
+    entities            TEXT,              -- JSON: [{name, type: person|place|project, normalized}]
+    themes              TEXT,              -- JSON: [string]
+    events              TEXT,              -- JSON: [string]   — what actually happened
+    stated_goals        TEXT,              -- JSON: [{text, is_new: bool}]
+    behaviors           TEXT,              -- JSON: [string]   — what user actually did (distinct from goals)
+    decisions           TEXT,              -- JSON: [string]
+    open_loops          TEXT,              -- JSON: [{description, status: open|updated|resolved}]
+    self_judgments      TEXT,              -- JSON: [string]   — regrets, self-criticism signals
+    -- Summary for ChromaDB embedding (embedded at the same time extraction runs)
+    summary             TEXT,             -- 4-5 sentences; NULL until status = done
+    extracted_at        TEXT              -- ISO-8601; NULL until status = done
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- L4 mood time-series (denormalized for fast chart queries; no LLM needed)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mood_series (
+    id          TEXT PRIMARY KEY,
+    entry_id    TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    date        TEXT NOT NULL,
+    mood        INTEGER,                   -- copied from extractions.mood
+    emotions    TEXT,                      -- JSON copy from extractions.emotions
+    is_seeded   INTEGER NOT NULL DEFAULT 0
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- L4 knowledge graph
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    id          TEXT PRIMARY KEY,
+    label       TEXT NOT NULL,
+    type        TEXT NOT NULL CHECK(type IN ('theme','person','place','goal','problem','emotion')),
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    entries     TEXT                       -- JSON: [entry_id]
+);
+
+CREATE TABLE IF NOT EXISTS graph_edges (
+    id           TEXT PRIMARY KEY,
+    source       TEXT NOT NULL REFERENCES graph_nodes(id),
+    target       TEXT NOT NULL REFERENCES graph_nodes(id),
+    type         TEXT NOT NULL CHECK(type IN ('co_occurrence','temporal','similarity','hypothesis')),
+    weight       REAL NOT NULL DEFAULT 0.0,
+    is_hypothesis INTEGER NOT NULL DEFAULT 0,   -- 1 = model-proposed; shown with confirm/dismiss UI
+    label        TEXT,                           -- human-readable edge label (e.g. "may lead to")
+    entries      TEXT                            -- JSON: [entry_id]
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Rollup digests (week → month → era)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS digests (
+    id           TEXT PRIMARY KEY,
+    level        TEXT NOT NULL CHECK(level IN ('week','month','era')),
+    period_start TEXT NOT NULL,            -- ISO date
+    period_end   TEXT NOT NULL,
+    summary      TEXT,                     -- model-narrated prose digest
+    stats        TEXT,                     -- JSON: {entry_count, avg_mood, top_themes, ...}
+    created_at   TEXT NOT NULL
+);
+```
+
+**Extraction retry contract:** On first JSON parse failure, retry once with `temperature=0.3` and a stricter prompt (all examples, no prose). If the second attempt also fails, write `extraction_status='null_stored'` and store NULLs — never block the save. A background sweep re-queues `null_stored` rows nightly. The mood chart skips NULL points (shows a gap) — never substitutes zero.
+
+**Migration:** Every schema change increments `PRAGMA user_version`. `db.py` reads the version at startup and applies pending migration blocks in order. Migrations touch only L1–L4; L0 Markdown is never touched by a migration.
+
+**ChromaDB collections:** Two separate collections, same embedding model (`bge-small-en-v1.5`):
+- `journals` — entry summaries with metadata `{entry_id, date, mood, themes, is_seeded}`. Populated at the same time as extraction, not as a separate phase. Filter `is_seeded=False` on recall queries.
+- `corpus` — book/PDF chunks with metadata `{source_file, page, section}`. Never mixed with journal recall.
+
+---
+
+### 7.2 L3 claim schema (`profile.json`)
+
+The full structure. All writes go through the operation grammar; the model never writes to `profile.json` directly.
+
+```json
+{
+  "schema_version": 1,
+  "identity": {
+    "stated_self": "a good, masculine Muslim man",
+    "principles": ["honesty", "discipline"],
+    "provenance": ["<entry-uuid>"]
+  },
+  "goals": [
+    {
+      "id": "<uuid>",
+      "text": "Pray fajr consistently",
+      "status": "active",
+      "confidence": 0.82,
+      "last_seen": "2026-06-10",
+      "evidence": ["<entry-uuid-1>", "<entry-uuid-4>"],
+      "source": "model"
+    }
+  ],
+  "patterns": [
+    {
+      "id": "<uuid>",
+      "text": "Avoids difficult conversations when tired",
+      "type": "behavior",
+      "confidence": 0.74,
+      "last_seen": "2026-06-08",
+      "evidence": ["<entry-uuid-2>", "<entry-uuid-5>"],
+      "source": "model"
+    }
+  ],
+  "relationships": [
+    {
+      "name": "Daniel",
+      "type": "friend",
+      "summary": "Close but tension around communication",
+      "evidence": ["<entry-uuid-2>"],
+      "last_seen": "2026-06-11"
+    }
+  ],
+  "emotional_baseline": {
+    "typical_mood": 1,
+    "known_triggers": ["fatigue", "conflict"],
+    "what_helps": ["prayer", "exercise"],
+    "evidence": ["<entry-uuid-3>"]
+  },
+  "open_loops": [
+    {
+      "id": "<uuid>",
+      "description": "Unresolved argument with Daniel about responsibilities",
+      "status": "open",
+      "opened": "2026-06-09",
+      "last_updated": "2026-06-11",
+      "evidence": ["<entry-uuid-2>", "<entry-uuid-7>"]
+    }
+  ],
+  "watch_list": [
+    {
+      "pattern_id": "<pattern-uuid>",
+      "conflicting_goal_id": "<goal-uuid>",
+      "description": "Skipping gym when tired contradicts fitness goal",
+      "evidence": ["<entry-uuid-5>"]
+    }
+  ],
+  "anchors": []
+}
+```
+
+**Anchors** are claim IDs the user manually corrected in `profile.md`. They carry `"source": "user"`. The operation grammar cannot apply `weaken` or `strengthen` to an anchor — only the user can change them via `PUT /profile`.
+
+**`profile.md` ↔ `profile.json` sync:** `profile.md` is a human-readable rendering of `profile.json`, regenerated by `profile.py` after each update. When the user edits and saves `profile.md`, a `PUT /profile` call re-parses the Markdown into a diff of JSON operations and applies them as `set_anchor` ops. The parse is lenient: unparseable sections are left unchanged and the user is warned. The `anchors` list tracks any claim IDs the user corrected.
+
+---
+
+### 7.3 L3 operation grammar
+
+The exact verbs the model may emit in nightly/weekly update calls. Code validates and applies them; the model never touches `profile.json` directly. **Any operation without at least one valid `entry_id` in the evidence array is silently rejected** — this is the primary anti-hallucination gate.
+
+| Operation | Required fields | Effect |
+|---|---|---|
+| `add_goal` | `text`, `evidence[]` | Append to goals; confidence = 0.5, status = active |
+| `update_goal_status` | `goal_id`, `status`, `evidence[]` | Change status (active → paused → achieved → abandoned) |
+| `add_pattern` | `text`, `type`, `evidence[]` | Append to patterns; confidence = 0.5 |
+| `strengthen` | `claim_id`, `evidence[]` | confidence += 0.1 (cap 1.0); add evidence pointers |
+| `weaken` | `claim_id`, `reason` | confidence -= 0.15 (floor 0.0); flag for review if < 0.2 |
+| `note_contradiction` | `claim_id_a`, `claim_id_b`, `evidence[]` | Add to watch_list; surface to user |
+| `mark_resolved` | `loop_id`, `evidence[]` | Set open_loop.status = resolved |
+| `update_loop` | `loop_id`, `note`, `evidence[]` | Append note; status = updated |
+| `add_relationship_note` | `name`, `note`, `evidence[]` | Append to relationship summary |
+| `set_anchor` | `claim_id` | Mark as user-corrected; blocks model overwrite (user-only op) |
+
+**Decay:** Nightly, confidence on each non-anchor pattern and goal is reduced by `0.01 × days_since_last_seen`. A claim not corroborated in 60 days falls below 0.5 and is flagged stale. Anchors do not decay.
+
+---
+
+### 7.4 Knowledge graph API schema (L4)
+
+The contract for `GET /insights/graph`. Both the Phase 14 stub and the real L4 builder must return this exact shape.
+
+```json
+{
+  "nodes": [
+    {
+      "id": "n-uuid",
+      "label": "prayer",
+      "type": "theme",
+      "entry_count": 12,
+      "entries": ["entry-uuid-1", "entry-uuid-3"]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-uuid",
+      "source": "n-uuid-a",
+      "target": "n-uuid-b",
+      "type": "co_occurrence",
+      "weight": 0.85,
+      "is_hypothesis": false,
+      "label": null,
+      "entries": ["entry-uuid-1"]
+    },
+    {
+      "id": "e-uuid-2",
+      "source": "n-uuid-c",
+      "target": "n-uuid-d",
+      "type": "hypothesis",
+      "weight": 0.6,
+      "is_hypothesis": true,
+      "label": "may lead to",
+      "entries": ["entry-uuid-5", "entry-uuid-8"]
+    }
+  ]
+}
+```
+
+Node `type` values: `theme` · `person` · `place` · `goal` · `problem` · `emotion`
+Edge `type` values: `co_occurrence` · `temporal` · `similarity` · `hypothesis`
+Hypothesis edges are rendered with a dashed line and a confirm/dismiss affordance in the UI. They are never presented as established fact.
+
+---
+
+### 7.5 Sentence-splitter rules (TTS boundary detection)
+
+`backend/voice/sentence_queue.py` must split the token stream at correct sentence boundaries. Rules in priority order:
+
+1. **Do not split after known abbreviations:** `Dr.` `Mr.` `Mrs.` `Ms.` `Prof.` `Sr.` `Jr.` `vs.` `etc.` `e.g.` `i.e.` `approx.` `est.` `fig.` `vol.` — these are checked as whole tokens before the period.
+2. **Do not split inside a number:** a period followed by a digit (`$3.50`, `v1.2`, `3.14`) is never a sentence boundary.
+3. **Do not split inside an open quotation:** an unmatched `"` or `'` means the sentence is still open.
+4. **Split on:** `. ` `! ` `? ` (punctuation + space + uppercase letter or end-of-stream), or `.\n` `!\n` `?\n`.
+5. **Minimum chunk length:** do not emit a TTS chunk shorter than 4 words — buffer it into the next sentence. (Short chunks sound robotic.)
+6. **Maximum chunk length:** flush at 80 words even without a boundary, splitting at the last word. (Prevents audio stall on very long model sentences.)
+
+**Implementation note:** use a stateful character-level scanner with the abbreviation list and open-quote flag. Do not use `nltk.sent_tokenize` — its import latency and batch-oriented design are unsuitable for token-by-token streaming.

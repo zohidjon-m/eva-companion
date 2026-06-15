@@ -20,11 +20,31 @@
 
 ### Global Rules (paste once at the start of every AI session)
 
+> These rules are also stored as `CLAUDE.md` at the repo root. Claude Code reads that file automatically at the start of every session, so you should never need to paste them manually — but verify the file is present before starting.
+
 ```
 You are building "Eva", a fully offline desktop AI journaling companion.
+Hardware target: MacBook M1 Air 8 GB RAM (Apple Silicon; Metal acceleration
+available via -ngl 99). Voice models (faster-whisper, Kokoro) are lazy-loaded
+on first use — never at startup — to stay within the 8 GB memory budget.
 Stack: Tauri (Rust shell) + React/Vite frontend + Python FastAPI backend +
 llama.cpp llama-server running gemma-4-E2B-it-qat-GGUF (port 11500, thinking
-mode OFF) + ChromaDB + SQLite + faster-whisper + Kokoro TTS. English only.
+mode OFF, -ngl 99) + ChromaDB + SQLite + faster-whisper + Kokoro TTS.
+English only.
+
+llama-server command:
+  export LLAMA_CACHE="unsloth/gemma-4-E2B-it-qat-GGUF"
+  ./llama.cpp/llama-server \
+      -hf unsloth/gemma-4-E2B-it-qat-GGUF:UD-Q4_K_XL \
+      --ctx-size 131072 \
+      --cache-type-k q8_0 --cache-type-v q8_0 \
+      --temp 1.0 --top-p 0.95 --top-k 64 \
+      -ngl 99 \
+      --port 11500
+
+Context budget per request: ≤ 8 192 tokens for real-time chat turns;
+≤ 32 768 for consolidation. The client sets max_tokens; never change
+--ctx-size to do per-request limiting.
 
 Rules:
 1. Implement ONLY the phase given. Do not touch later phases. Do not refactor
@@ -76,41 +96,56 @@ Milestone A = it runs. ▸ B = the demo product. ▸ C = it looks intelligent (r
 ### Phase 0 — Scaffold: shell + backend + health
 **Goal:** an empty but running app: Tauri window ↔ FastAPI backend over localhost.
 **Build:**
+- `CLAUDE.md` at the repo root containing the Global Rules block verbatim — Claude Code reads this file automatically, so rules are active without pasting.
 - Tauri app with React + Vite frontend (`ui/`), backend in `backend/` (Python 3.11, FastAPI, venv).
-- Backend launched as a sidecar by Tauri in dev mode (a `dev.sh` / `dev.ps1` that starts both is fine for now).
+- Backend launched as a sidecar by Tauri in dev mode (a `dev.sh` that starts both is fine for now).
 - `GET /health` returns `{status, model_present: false}`; frontend shows a status dot that reads it.
+- **Packaging spike:** create a "hello world" FastAPI endpoint, bundle it as a Tauri sidecar via PyInstaller (or embedded venv), and confirm the packaged binary launches correctly on macOS. This is a one-time proof; it does not need to be complete packaging — just proof the mechanism works. If this fails, solve it now, not in Phase 15.
+- **Early socket guard:** at backend startup, install a global outbound socket block: any connection attempt to a host other than `127.0.0.1` / `localhost` raises an exception and is logged. The single allowlisted host for first-run download is controlled via an env var (`EVA_ALLOW_HOST`). The Offline ✓ badge UI wires in Phase 10, but the block must exist from Phase 0 so no library accidentally phones home during development.
 - Repo hygiene: `.gitignore` (venv, node_modules, `local_vault/`), `README.md` with run instructions.
-**Read these:** `backend/app.py`, `ui/src/App.tsx`, the dev script.
+**Read these:** `backend/app.py`, `ui/src/App.tsx`, the dev script, the socket guard code.
 **Test:**
-- `dev` script opens the window; the status dot is green.
+- `dev.sh` opens the window; the status dot is green.
 - `curl localhost:8000/health` returns 200 JSON.
-**Done when:** app opens, backend answers, repo is clean. Commit.
+- The packaged hello-world sidecar launches and responds.
+- Attempt an outbound HTTP request from Python (e.g. `requests.get("https://example.com")`) → confirm it is blocked and logged.
+**Done when:** app opens, backend answers, packaging spike passes, socket guard is live. Commit.
 
 ### Phase 1 — Model online: streaming chat (backend only)
 **Goal:** gemma4 streams tokens through the backend. No UI yet — proven with curl.
 **Build:**
-- `backend/llm/server.py`: start/supervise `llama-server` with the model (`unsloth/gemma-4-E2B-it-qat-GGUF:UD-Q4_K_XL`, port 11500, `--jinja`, thinking OFF, temp 1.0 / top-p 0.95 / top-k 64). If the GGUF is missing, return a clear "model not found" state with the per-OS download command — never crash.
-- `backend/llm/client.py`: async `stream_chat(messages) -> token iterator` against the OpenAI-compatible endpoint.
+- `backend/llm/server.py`: start/supervise `llama-server` with the exact command from the Global Rules (`-ngl 99`, port 11500, thinking OFF, temp 1.0 / top-p 0.95 / top-k 64). If the GGUF is missing, return a clear "model not found" state with the download command — never crash.
+- `backend/llm/client.py`: async `stream_chat(messages, max_tokens=450, priority=True) -> token iterator` against the OpenAI-compatible endpoint. The `max_tokens` param enforces per-request context budgets; the server's `--ctx-size` is never changed per-request. The `asyncio.Lock` from EVA_SYSTEM_DESIGN.md §8 lives here.
 - `WS /chat`: accepts a message, streams tokens back.
-- `scripts/download_model_mac.sh` + `scripts/download_model_win.ps1`.
+- `scripts/download_model_mac.sh`.
 **Read these:** `llm/server.py`, `llm/client.py` — this is the heart of the app; understand both fully.
 **Test:**
-- With model present: a WebSocket client (small `scripts/ws_test.py`) sends "hello", tokens stream back, reply is coherent.
+- With model present: a WebSocket client (`scripts/ws_test.py`) sends "hello", tokens stream back, reply is coherent.
 - Move the GGUF away: `/health` reports `model_present: false` and the download command; nothing crashes.
-**Done when:** streaming works and the missing-model path is graceful. Commit.
+- Confirm `-ngl 99` is in the server launch args; check `llama-server` logs for "Metal" or "GPU" offload confirmation.
+**Done when:** streaming works, missing-model path is graceful, Metal offload is confirmed. Commit.
 
-### Phase 2 — Vault: real entry capture (L0 + basic L1)
-**Goal:** everything the user writes is genuinely persisted from day one.
-**Build:**
+### Phase 2 — Vault: real entry capture (L0 + full L1)
+**Goal:** everything the user writes is genuinely persisted from day one, with the complete L1 schema.
+
+> **Before starting this phase:** the extraction prompt (`backend/prompts/extract_entry.md`) MUST be written and tested against the real model in a separate session. Run 5–10 realistic journal entries through it manually and confirm the JSON is consistently parseable. Do not begin Phase 2 code until the prompt passes that bar.
+
+**Step A — Vault + schema (do this first; stop and review before Step B):**
 - `backend/memory/vault.py`: append-only `local_vault/journal/YYYY-MM-DD.md` with YAML frontmatter; one file per day, turns appended with timestamps. Plain Markdown, readable without the app.
-- `backend/memory/db.py`: SQLite with two tables for now — `entries` (id, date, type: chat|journal, text, created_at) and `extractions` (entry_id, summary, mood int −5..+5, entities JSON, themes JSON). FTS5 on text.
-- `backend/memory/extract.py`: one bounded gemma4 call per saved entry → `{summary (4–5 sentences), mood, entities, themes}` as strict JSON (few-shot prompt; on parse failure retry once, then store nulls — never block saving).
-- Wire `/chat` so every user turn is saved (vault + db) and extraction runs in the background.
-**Read these:** `vault.py` (the storage contract), `extract.py` (the prompt + JSON parsing).
+- `backend/memory/db.py`: apply `schema.sql` from `EVA_MEMORY_ARCHITECTURE.md §7.1` exactly — all tables, all columns, all constraints. Do not improvise or simplify the schema; missing columns cannot be retroactively added without a migration and data loss for early entries.
+- Confirm: `sqlite3 local_vault/eva.db .schema` matches the spec. Commit checkpoint before moving to Step B.
+
+**Step B — Extraction + ChromaDB + wiring:**
+- `backend/memory/extract.py`: one bounded gemma4 call per saved entry using the pre-approved `extract_entry.md` prompt. Output is strict JSON matching the full L1 extraction schema. Retry once at `temperature=0.3` on parse failure; on second failure write `extraction_status='null_stored'` and store NULLs — never block saving. Log all failures.
+- `backend/memory/vector.py`: ChromaDB persistent client; create the `journals` collection with `bge-small-en-v1.5`. On every successful extraction, embed the summary into `journals` with metadata `{entry_id, date, mood, themes, is_seeded: False}`. This is done here — not deferred to Phase 11 — so seeded data and real data are all embeddable from day one.
+- Wire `/chat` so every user turn is saved (vault + db), extraction runs in the background, and on success the summary is embedded.
+**Read these:** `vault.py` (the storage contract), `extract.py` (the prompt + JSON parsing), `vector.py` (the embedding path).
 **Test:**
-- Send 3 chat messages → today's `.md` contains all 3, correctly formatted; SQLite has 3 entry rows and (after a moment) 3 extraction rows with plausible mood/summary.
-- Delete the SQLite file → Markdown remains complete and readable. Unit test: extraction JSON parser handles malformed output.
-**Done when:** capture is real, durable, and survives DB loss. Commit.
+- Send 3 chat messages → today's `.md` contains all 3, correctly formatted; SQLite has 3 entry rows; after extraction, 3 rows in `extractions` with status `done` and all non-null fields; 3 vectors in the `journals` ChromaDB collection.
+- Deliberately send malformed output from the model (mock the LLM response): confirm `null_stored` status, null fields, and that the vault entry still exists.
+- Delete the SQLite file → Markdown remains complete and readable.
+- Unit test: extraction JSON parser handles every bad-output case (empty string, truncated JSON, wrong schema).
+**Done when:** capture is real, durable, survives DB loss, and ChromaDB is seeded from day one. Commit.
 
 ### Phase 3 — App shell UI + design system
 **Goal:** the frame of a genuinely good-looking app, before any feature screens.
@@ -130,12 +165,15 @@ Milestone A = it runs. ▸ B = the demo product. ▸ C = it looks intelligent (r
 **Build:**
 - Chat screen wired to `WS /chat`: user bubbles, Eva bubbles that stream token-by-token with a typing indicator, auto-scroll, error toast + retry if the socket drops.
 - Conversation history for the current session (in memory + persisted via Phase 2 capture).
-- Eva's first system prompt: `backend/prompts/eva_system.md` — companion identity, warm, listens first, concise replies (~450 token cap). Keep it simple; personas come later.
+- System prompt assembled from template slots in `backend/prompts/assembly.py`. The slots are: `{persona_block}` (from `eva_system.md` — loaded as-is), `{memory_context}` (empty until Phase 11), `{profile_slices}` (empty until Phase 13), `{corpus_context}` (empty until Phase 7). Each slot is a separate string, never concatenated by hand. This architecture means adding memory or profile context later is a one-line change, not a prompt surgery.
+- Eva's persona block: `backend/prompts/eva_system.md` — companion identity, warm, listens first. Token cap: 450 for default persona.
+- **Interim crisis-care rule** (active until NeMo guardrails are built in a later phase): before the assembled prompt reaches the model, run a cheap keyword check (`backend/safety/crisis_check.py`) over the user's input. Keywords: `end my life`, `kill myself`, `don't want to be here`, `hurt myself` (and close variants). On match, append a crisis-aware addendum to the persona block instructing Eva to acknowledge with care and gently encourage reaching out — do not suppress the reply or hand off to a bot script.
 - Enter to send, Shift+Enter newline; input disabled while Eva is replying.
-**Read these:** the chat component, `eva_system.md`.
+**Read these:** `assembly.py` (the template), `eva_system.md`, `crisis_check.py`.
 **Test:**
 - Hold a 6+ turn conversation; streaming is smooth, history correct, today's `.md` captured everything.
 - Kill the backend mid-reply → UI shows a graceful error and recovers on restart.
+- Send a crisis-signal message → Eva's reply is warm and mentions reaching out; it does not ignore the signal or lecture.
 **Done when:** a stranger could chat with Eva and nothing would feel broken. Commit.
 
 ### Phase 5 — Journaling surface (separate from chat)
@@ -170,37 +208,42 @@ Milestone A = it runs. ▸ B = the demo product. ▸ C = it looks intelligent (r
 - `backend/memory/retrieval.py`: embed query → top-k corpus chunks above a relevance threshold.
 - Chat integration: retrieved passages injected into the prompt with a hard rule — *answer from the passages; if they don't contain it, say so; never invent a quote or citation.*
 - Citations rendered in the chat UI as small source chips (file + page/section); clicking shows the passage text.
-- A simple trigger for v1: retrieval runs when the user's message asks a question (heuristic or tiny classifier) — full intent-mode gating is a later TODO; mark the seam.
-**Read these:** `retrieval.py`, the grounded prompt template — check the no-invented-citations rule yourself.
+- **Minimal intent classifier** (`backend/intent/classifier.py`): a 3-class classifier — `vent`, `question`, `advice_request` — that runs on every user message before retrieval. This is not fully deferred; the test "pure venting message → no retrieval fires" requires it. Implementation: a rule-based layer first (question marks, advice keywords like "what should I do", "any advice", "help me think") with a tiny prompt-based fallback for ambiguous cases. Mark the seam clearly (`# INTENT-SEAM: replace with full 5-class classifier`) so the real intent engine (vent/process/ask_info/ask_advice/ambient) plugs in later. RAG retrieval fires only on `question` and `advice_request`; `vent` class bypasses retrieval entirely.
+**Read these:** `retrieval.py`, the grounded prompt template, `classifier.py` — check the no-invented-citations rule and the vent-bypass yourself.
 **Test:**
 - Ask something answered in the uploaded book → correct answer + correct chip pointing at the right page.
 - Ask something NOT in any document → Eva says she doesn't find it in your library (no fabricated citation).
-- Pure venting message → no retrieval fires, no citations appear.
-**Done when:** grounded answers are accurate, cited, and honest about gaps. Commit.
+- Pure venting message (no question mark, no advice keyword) → no retrieval fires, no citations appear. Confirm via log.
+- Ambiguous message ("I don't know what to do") → check that the fallback classifier fires and produces a reasonable label.
+**Done when:** grounded answers are accurate, cited, and honest about gaps; venting bypass is confirmed in logs. Commit.
 
 ### Phase 8 — Voice in (push-to-talk STT)
 **Goal:** speak to Eva instead of typing.
 **Build:**
-- `backend/voice/stt.py`: faster-whisper `base.en` int8, loaded once; `POST /stt` (audio → text).
+- `backend/voice/stt.py`: faster-whisper, **model size configurable via settings** (default `base.en` int8; user can switch to `small.en` in Settings if transcription quality is poor on their accent). Lazy-loaded on first STT request — not at backend startup. `POST /stt` (audio → text).
 - Mic button in chat + journal: hold-to-record (or click-toggle), 120 s cap, level indicator while recording.
 - Flow: release → transcribe → text appears in the input box for confirmation → sends through the normal pipeline (so capture/RAG are identical for voice and text).
+- The Settings screen (Phase 10) exposes the Whisper model size as a dropdown; `stt.py` reloads the model on change.
 **Read these:** `stt.py`, the recorder hook in the UI.
 **Test:**
-- Speak two sentences → accurate transcription lands in the input within ~2 s of release.
+- Speak two sentences → accurate transcription lands in the input within ~1.5 s of release (on M1 Air with Metal).
 - 120 s cap enforced; mic-permission-denied shows a helpful message, not a crash.
-**Done when:** voice input is accurate and stable on your demo machine. Commit.
+- Switch to `small.en` in settings → the next transcription uses the new model (confirmed via log).
+**Done when:** voice input is accurate and stable on the demo machine. Commit.
 
 ### Phase 9 — Voice out (Kokoro + sentence queue)
 **Goal:** Eva speaks her replies naturally, starting almost immediately.
 **Build:**
-- `backend/voice/tts.py`: Kokoro, voice `af_heart`, text → 24 kHz wav chunk.
-- `backend/voice/sentence_queue.py`: consume the token stream, buffer to sentence boundaries (handle abbreviations/numbers), synth each sentence, emit ordered audio chunks over the chat WebSocket alongside text.
+- `backend/voice/tts.py`: Kokoro, voice `af_heart`, text → 24 kHz wav chunk. Lazy-loaded on first TTS request.
+- `backend/voice/sentence_queue.py`: consume the token stream, buffer to sentence boundaries, synth each sentence, emit ordered audio chunks over the chat WebSocket alongside text. Implement the **sentence-splitter rules from `EVA_MEMORY_ARCHITECTURE.md §7.5` exactly** — abbreviation list, number-period rule, open-quote rule, 4-word minimum, 80-word maximum flush. Do not use `nltk.sent_tokenize`.
 - UI: sequential audio playback queue; voice on/off toggle in the top bar; stop-speaking button.
-**Read these:** `sentence_queue.py` — the trickiest concurrency in the app; make the AI comment the ordering logic until you can explain it.
+**Read these:** `sentence_queue.py` — the trickiest concurrency in the app; have Claude Code comment every state transition in the splitter until you can explain each one.
 **Test:**
 - Voice on, ask a multi-sentence question → Eva starts speaking ≤ ~2.5 s after generation starts, sentences play in order, no overlap/cutoff, text and audio match.
-- Toggle voice off mid-reply → audio stops, text continues. A reply with "Dr. Smith paid $3.50." doesn't split mid-abbreviation.
-**Done when:** talking with Eva feels like a conversation, not a buffer. Commit.
+- Toggle voice off mid-reply → audio stops, text continues.
+- Test the exact string: `"He saw Dr. Smith, who paid $3.50 for it. Then left."` → must split into exactly two TTS chunks (before "Then"), not three or four.
+- Test: `"She said 'I'll be there'"` (open quote) → no split inside the quoted phrase.
+**Done when:** talking with Eva feels like a conversation, not a buffer; all splitter test cases pass. Commit.
 
 ### Phase 10 — Polish pass: states, settings, offline badge
 **Goal:** convert "works" into "impressive"; kill every rough edge a demo audience would notice.
@@ -230,38 +273,40 @@ Milestone A = it runs. ▸ B = the demo product. ▸ C = it looks intelligent (r
 ### Phase 12 — Mood capture + chart
 **Goal:** visible mood tracking from the data you're already extracting.
 **Build:**
-- `GET /insights/mood?from=&to=` — SQL over the extractions table (no LLM).
-- Insights screen, first real block: a clean mood line/area chart (7/30-day toggle), dots per entry, hover shows that day's summary; tasteful empty state when history is short.
-- Seed script: `scripts/seed_demo.py` generates ~3 weeks of plausible backdated entries + extractions so the demo has history (clearly marked, removable).
+- `GET /insights/mood?from=&to=` — SQL over the `mood_series` table (populated by extraction, no LLM). Filter `WHERE is_seeded = 0` for live data; the endpoint accepts a `?include_seeded=true` param for the demo chart.
+- Insights screen, first real block: a clean mood line/area chart (7/30-day toggle), dots per entry, hover shows that day's summary; tasteful empty state when history is short. NULL mood days show as gaps in the line, never as zero.
+- Seed script: `scripts/seed_demo.py` generates ~3 weeks of backdated entries + extractions + mood_series rows, all with `is_seeded = 1`. Seed data is clearly marked in the DB and excluded from recall queries (the `journals` ChromaDB collection filters `is_seeded=False`). Run the seed script before the demo; it is safe to run on a vault that already has real entries.
 **Read these:** the SQL in the insights endpoint; the seed script (you'll run it before the demo).
 **Test:**
-- With seeded data the chart reads like a believable month; hover shows real summaries; a new journal entry appears on it after extraction.
+- With seeded data the chart reads like a believable month; hover shows real summaries; a new (real) journal entry appears on the chart after extraction with `is_seeded = 0`.
+- Confirm seeded entries do NOT appear in recall (Phase 11 memory chip must not surface seed data).
 **Done when:** the mood story lands visually with real plumbing under it. Commit.
 
 ### Phase 13 — Static profile behind a real seam (Eva uses it)
 **Goal:** demo the *payoff* of the evolving profile without building the update engine.
 **Build:**
-- `backend/memory/profile.py` with the **real future interface**: `get_profile() -> Profile`, `get_slices(topic) -> fragments`. For now it reads a hand-written `local_vault/profile.md` + `profile.json` (identity & aspirations, 2–3 goals, 2 recurring patterns, key people, emotional baseline). `# DEMO-STUB: replaced by L3 engine`.
-- Chat integration: relevant profile slices included in Eva's context every turn — she genuinely knows your goals/values and tailors replies (this is the highest-leverage fake in the project: the *use* is real, only the *updating* is stubbed).
-- Profile screen: renders `profile.md` nicely, with an edit button (edits persist — this is also the future human-correction anchor).
-**Read these:** `profile.py` (the seam), the context-assembly code that injects slices.
+- `backend/memory/profile.py` with the **real future interface**: `get_profile() -> Profile`, `get_slices(topic) -> fragments`. For now it reads a hand-written `local_vault/profile.json` + `local_vault/profile.md`. The JSON **must conform to the `profile.json` schema from `EVA_MEMORY_ARCHITECTURE.md §7.2`** exactly — same fields, same types, same structure the real L3 engine will write. `# DEMO-STUB: replaced by L3 engine`.
+- Chat integration: relevant profile slices included in Eva's context every turn via the `{profile_slices}` slot in `assembly.py` — she genuinely knows your goals/values and tailors replies.
+- Profile screen: renders `profile.md` nicely, with an edit button (edits persist to both `profile.md` and `profile.json` via the sync described in §7.2 of the Memory Architecture doc — this is also the future human-correction anchor).
+**Read these:** `profile.py` (the seam), the context-assembly code in `assembly.py`.
 **Test:**
 - Profile says you value discipline + a fitness goal → "should I skip the gym today?" gets an answer that references *your* stated goal, unprompted.
-- Edit the profile (change a goal), ask again → Eva reflects the edit. Delete `profile.md` → app degrades gracefully (no profile context, no crash).
+- Edit the profile (change a goal), ask again → Eva reflects the edit. Delete `profile.json` → app degrades gracefully (no profile context, no crash).
 **Done when:** Eva demonstrably knows who you are, via the same interface the real L3 will implement. Commit.
 
 ### Phase 14 — Seeded insights: graph + growth report
 **Goal:** complete the surface area — every promised screen exists and looks finished.
 **Build:**
-- `GET /insights/graph` and `GET /insights/growth?a=&b=` returning **seeded but well-shaped** data (`# DEMO-STUB`), schemas matching the system-design doc.
-- Knowledge-graph view: interactive force-directed graph (themes/people/problems as typed nodes; association edges; click → side panel listing the "evidence" entries). Cytoscape or d3.
+- `GET /insights/graph` and `GET /insights/growth?a=&b=` returning **seeded but well-shaped** data (`# DEMO-STUB`). Both endpoints must return data conforming exactly to the schemas in `EVA_MEMORY_ARCHITECTURE.md §7.4` (graph) and the growth shape in the System Design §11 — the real L4 must satisfy these exact schemas later.
+- Knowledge-graph view: interactive force-directed graph (themes/people/problems as typed nodes; association edges; click → side panel listing the "evidence" entries). Cytoscape or d3. Hypothesis edges render dashed with confirm/dismiss affordance.
 - Growth view: a descriptive period-comparison report (theme shifts, mood delta, a reflective closing question) — framed as reflection, never a verdict.
-- Where seeded data can cheaply be real, let it be: e.g. graph nodes from actual extracted themes/entities with co-occurrence edges is ~a day and makes the graph honest — do it if schedule allows, otherwise seed.
+- Where seeded data can cheaply be real, let it be: graph nodes from actual extracted themes/entities with co-occurrence edges — these are a day's work and make the graph honest. All seeded graph data has `is_seeded=1` in `graph_nodes`/`graph_edges` so it can be pruned later.
 **Read these:** the two endpoint schemas (they're the contract the real L4 must satisfy later).
 **Test:**
 - Graph renders smoothly with ~30 nodes, interactions feel good, evidence panel opens; growth report reads as thoughtful and descriptive.
 - Both screens behave with empty data (fresh vault).
-**Done when:** Insights feels like a finished product area. Commit.
+- Both endpoints return JSON that validates against the §7.4 schema (write a quick `scripts/validate_graph.py`).
+**Done when:** Insights feels like a finished product area and schemas are validated. Commit.
 
 ### Phase 15 — Demo hardening + packaging + script
 **Goal:** protect the live demo from itself.
@@ -282,15 +327,17 @@ Tracked as TODOs so nothing is silently forgotten. Each plugs into a seam that a
 | Deferred work | Plugs into |
 |---|---|
 | L3 update engine (operations, evidence pointers, confidence/decay, contradiction resolution) | `profile.py` seam (Phase 13) |
-| Nightly/weekly consolidation + scheduler + rollup digests | background jobs; feeds profile + insights |
+| Nightly/weekly consolidation + APScheduler + rollup digests | background jobs; feeds profile + insights |
 | Real pattern/mistake mining (behavior-vs-goal contradictions) | growth + graph endpoints (Phase 14 schemas) |
 | Real knowledge-graph edges (temporal precedence, hypothesis edges) | `GET /insights/graph` |
 | Real growth analytics (period deltas in SQL) | `GET /insights/growth` |
-| Intent classifier (vent/process/ask_info/ask_advice) + listen-first retrieval gating | the retrieval-trigger seam (Phase 7) |
+| Full 5-class intent classifier (vent/process/ask_info/ask_advice/ambient) | replaces the Phase 7 3-class stub at the `# INTENT-SEAM` marker |
 | Personas (close friend / coach / mentor) | persona selector (visual since Phase 3) |
-| NeMo guardrails + crisis-care path | wraps the chat pipeline |
+| NeMo guardrails + full crisis-care path | replaces the Phase 4 keyword `crisis_check.py` |
 | Time-travel UI (beyond the past-entries list), photo attachments | journal browse (Phase 5) |
-| Windows + macOS dual packaging, full setup wizard | Phase 10/15 foundations |
+| macOS full packaging + setup wizard | Phase 10/15 foundations |
+| `scripts/reindex.py` (ChromaDB re-embed on model change) | `vector.py` versioning guard |
+| `profile.md` ↔ `profile.json` bidirectional parser | `PUT /profile` endpoint (stub exists in Phase 13) |
 
 ---
 

@@ -94,10 +94,23 @@ Three local processes, one machine, no network at runtime.
 | Backend | Python 3.11 + FastAPI (asyncio) | All orchestration, memory, voice workers, guardrails | Spawned by the shell as a sidecar on launch |
 | Model server | llama.cpp `llama-server` | Serves Gemma 4 E2B over an OpenAI-compatible endpoint | Spawned & supervised by the backend |
 
-- **Packaging:** Tauri bundles the frontend and ships the backend as a packaged sidecar (PyInstaller or an embedded venv) plus the llama.cpp binaries for the target OS. One installer per platform.
+- **Packaging:** Tauri bundles the frontend and ships the backend as a packaged sidecar (PyInstaller or an embedded venv) plus the llama.cpp binaries for the target OS. One installer per platform. *Do a packaging spike in Phase 0 — before any real code — to verify the sidecar mechanism works on the target OS; do not leave this to Phase 15.*
 - **First run:** the setup wizard downloads the model GGUF (the only permitted network call), the Kokoro voice, and the faster-whisper weights into the vault/cache, then verifies them. After that the app is fully offline.
-- **Voice workers** (faster-whisper, Kokoro) run inside the backend process as worker threads/tasks — they're Python libraries, not separate servers — keeping audio paths low-latency.
+- **Voice workers** (faster-whisper, Kokoro) are **lazy-loaded on first use**, not at backend startup. On M1 Air 8GB, loading all voice models at startup alongside the model server exhausts available RAM. Load faster-whisper on the first STT request; load Kokoro on the first TTS request; keep them loaded thereafter.
 - **Model serving choice:** `llama-server` over Ollama because it exposes a clean OpenAI-compatible endpoint (clean for both the engine and NeMo), gives explicit control of generation params and thinking-mode, and avoids Ollama's then-current audio crashes. (See §10.)
+- **Exact server command (macOS / M1):**
+  ```sh
+  export LLAMA_CACHE="unsloth/gemma-4-E2B-it-qat-GGUF"
+  ./llama.cpp/llama-server \
+      -hf unsloth/gemma-4-E2B-it-qat-GGUF:UD-Q4_K_XL \
+      --ctx-size 131072 \
+      --cache-type-k q8_0 --cache-type-v q8_0 \
+      --temp 1.0 --top-p 0.95 --top-k 64 \
+      -ngl 99 \
+      --port 11500
+  ```
+  `-ngl 99` puts all layers on Metal (Apple GPU). On M1 Air this is mandatory — CPU-only inference on a 2B model is 3–5× slower and will miss latency targets. `--ctx-size 131072` is the *server maximum*; each chat request must stay within a per-request context budget (≤ 8 192 tokens for real-time turns, ≤ 32 768 for consolidation tasks). The client controls this via `max_tokens` and message truncation — never by changing the server flag.
+- **M1 Air 8 GB memory budget (shared CPU + GPU RAM):** model weights ~2.3 GB · KV cache at 8 k ctx ~0.3 GB · FastEmbed model ~130 MB · faster-whisper base.en ~150 MB (lazy) · Kokoro ~200 MB (lazy) · Python backend ~350 MB · macOS overhead ~1.5 GB = ~5 GB typical, leaving ~3 GB headroom. Do not load voice models before they are needed. If memory pressure is observed, reduce ChromaDB in-memory cache size.
 
 ---
 
@@ -144,7 +157,13 @@ The five-layer memory maps onto three physical stores, all inside the user's vau
 
 Design rules that the data layer enforces (from the Memory doc): **every L3 claim carries evidence pointers** to L1 entries (no pointer → not a claim); **summaries are embedded, full text is preserved**; L1–L4 are all **rebuildable from L0**; the user can read/edit/delete everything.
 
+**ChromaDB collections are strictly separated:** `journals` (entry summaries, metadata: `{entry_id, date, mood, themes, is_seeded}`) and `corpus` (book chunks, metadata: `{source_file, page, section}`). Recall queries never touch the corpus collection; advice retrieval never touches the journals collection. The two collections use the same embedding model (`bge-small-en-v1.5`) but different distance thresholds calibrated separately.
+
+**ChromaDB embedding model versioning:** if the embedding model is ever changed (e.g. `bge-small` → `bge-base`), existing vectors are incompatible. `vector.py` stores the model name in a config record inside the collection metadata. On startup it checks: if the stored model name does not match the current model, it raises a migration error and provides a `scripts/reindex.py` command to re-embed from scratch. Never silently mix vectors from different models.
+
 **Recovery posture:** if SQLite or Chroma is corrupted, rebuild from L0 by re-running extraction and embedding. If `profile.json` is lost, rebuild incrementally from L1 (with the user's `profile.md` edits re-applied as anchors). L0 is the only irreplaceable store, so it is append-only and never rewritten.
+
+**Vault portability:** the vault path is stored in settings as an absolute path. If the user moves the vault folder, they re-point it in Settings → Vault Location. All internal references use relative paths *within* the vault (e.g. `journal/2026-06-10.md`, not `~/EvaVault/journal/...`), so the vault itself is self-consistent regardless of where it lives.
 
 ---
 
@@ -185,7 +204,25 @@ These read L4/L0 with no heavy model reasoning: mood charts and growth deltas ar
 ## 8. Concurrency & scheduling
 
 - The backend is async (asyncio). The **real-time chat path has priority**; it must never block on a background job.
-- **Background jobs** (nightly/weekly consolidation) run on a scheduler (e.g. APScheduler) when the app is idle / at night. They share the single `llama-server`, so the scheduler **defers jobs while a chat turn is active** and serializes model access to avoid contention.
+- **Background jobs** (nightly/weekly consolidation) run on APScheduler when the app is idle / at night. They share the single `llama-server`, so model access is serialized through a single `asyncio.Lock`.
+- **Concurrency mechanism (concrete):**
+  ```python
+  # backend/llm/client.py
+  _model_lock = asyncio.Lock()
+
+  async def stream_chat(messages, priority=False):
+      """Acquire the model lock before calling llama-server.
+      priority=True is used by the real-time chat path.
+      Background jobs call with priority=False and check the flag
+      before acquiring; if a chat turn is in progress they defer
+      by sleeping and retrying."""
+      if not priority:
+          # Yield to any waiting chat turns before taking the lock
+          await asyncio.sleep(0)
+      async with _model_lock:
+          # ... stream tokens from llama-server
+  ```
+  The scheduler calls `run_nightly()` / `run_weekly()` only when `/chat` is idle (no active WebSocket session). APScheduler fires the job; if a chat turn starts mid-job the job's next model call blocks on the lock until the chat turn finishes — it does not cancel the job.
 - This split — fast E2B chat vs. slower, heavier background reflection — is the core concurrency idea that makes the ambitious analytics features feasible on a small model: the hard work happens where latency doesn't matter.
 
 ---
@@ -196,7 +233,7 @@ These read L4/L0 with no heavy model reasoning: mood charts and growth deltas ar
 
 **Safety & wellbeing.** Light guardrails keep voice responsive while blocking out-of-scope topics and enforcing grounded citations. A crisis-care path detects signals of self-harm/abuse and responds with care plus a gentle nudge toward a real person or professional support — never clinical, never method detail. Growth analytics are framed as reflection, never a verdict on the user's character.
 
-**Performance / latency budgets.** Targets (mid laptop; faster on Apple Silicon/GPU, slower on CPU-only Windows): STT < ~2 s after speech; LLM TTFT ~0.3–1 s; perceived first-speech ~1–2.5 s; end-to-end ~3–5 s. Limits: voice input ≤ 120 s/recording; text input ≤ ~8,000 chars; reply ~450 tokens default, ~800 in coach/mentor, hard cap 1,000.
+**Performance / latency budgets.** Primary target: MacBook M1 Air 8 GB with `-ngl 99` (Metal). STT < ~1.5 s after speech release (faster-whisper base.en on Metal); LLM TTFT ~0.3–0.8 s; perceived first-speech (first sentence synthesized) ~1.5–2.5 s; end-to-end turn ~3–5 s. On CPU-only machines (no Metal) all figures roughly double — warn the user during setup if Metal is unavailable. Limits: voice input ≤ 120 s/recording; text input ≤ ~8 000 chars; reply ~450 tokens default, ~800 in coach/mentor, hard cap 1 000. Per-request context budget: real-time chat turns cap the messages passed to llama-server at 8 192 tokens total (system + history + context); consolidation tasks may use up to 32 768 tokens but run off the real-time path.
 
 **Observability.** Local-only structured logs (no remote). A debug panel can show the assembled context, the chosen intent, retrieved evidence pointers, and applied L3 operations — making the system auditable to the user, which is also the anti-hallucination story.
 
