@@ -36,6 +36,34 @@ PERSONA_PATH = Path(__file__).resolve().parent / "eva_system.md"
 # normal reply mid-sentence.
 REPLY_MAX_TOKENS = 450
 
+# Phase 5 journal acknowledgment: a single, very short line offered back after a
+# journal entry is saved. Capped tight because it is one reflection, not a reply.
+JOURNAL_ACK_MAX_TOKENS = 120
+
+# The instruction that turns Eva's persona into a one-line journal acknowledgment.
+# It rides on top of the same persona block (so the voice is identical to chat),
+# and it hard-codes the Phase-5 rule: a reflection or one soft question, never
+# advice. The persona already forbids advice-unless-asked; this makes the journal
+# case explicit so a saved entry is never answered with solutions or a summary.
+JOURNAL_ACK_INSTRUCTION = (
+    "The person has just finished writing the journal entry below. They did not "
+    "ask you anything. Offer ONE short line back to them — a single gentle "
+    "reflection, or one soft open question that shows you truly read it, in their "
+    "own terms. Do not give advice, solutions, reassurances, lessons, or a "
+    "summary, and ask at most one question. One or two sentences of plain, warm "
+    "spoken prose — nothing else."
+)
+
+
+def build_journal_ack_prompt() -> str:
+    """Build the system prompt for the post-save journal acknowledgment.
+
+    Reuses Eva's persona verbatim (so the journal voice and the chat voice are
+    the same Eva) and appends :data:`JOURNAL_ACK_INSTRUCTION`. Kept here beside
+    the chat assembly so every prompt Eva speaks with is composed in one place.
+    """
+    return f"{load_persona()}\n\n{JOURNAL_ACK_INSTRUCTION}"
+
 # The three *context* slots, in the order they are appended after the persona.
 # Each entry is (slot_name, header_shown_to_the_model). The persona block is
 # handled separately because it is the prompt's spine, not a context section.

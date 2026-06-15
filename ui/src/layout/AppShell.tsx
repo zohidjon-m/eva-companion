@@ -22,10 +22,10 @@ export function AppShell() {
 
   const item = NAV_ITEMS.find((n) => n.id === active)!;
   const Section = SECTIONS[active];
-  // Chat owns its full-height layout (its own scroll + a pinned composer), so it
-  // renders flush — without the centered content column and page header that the
-  // empty-state sections use.
-  const isFlush = active === "chat";
+  // Chat and Journal own their full-height layouts (their own scroll + pinned
+  // chrome), so they render flush — without the centered content column and page
+  // header that the empty-state sections use.
+  const isFlush = active === "chat" || active === "journal";
 
   // Keep the window title in step with the section, the way a native app does.
   useEffect(() => {

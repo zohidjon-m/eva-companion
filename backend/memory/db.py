@@ -128,6 +128,34 @@ def count_entries(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
 
 
+def list_journal_days(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return one row per day that has journal entries, newest day first.
+
+    Powers Phase 5's browseable past-entries list. Each row carries the ``date``,
+    the ``count`` of journal turns that day, and a ``preview`` (the text of the
+    most recent journal turn that day, for a one-line teaser). Only ``journal``
+    entries are counted — chat turns live on the same day files but are not part
+    of the journal browse.
+    """
+    return conn.execute(
+        """
+        SELECT
+            e1.date AS date,
+            COUNT(*) AS count,
+            (
+                SELECT e2.text FROM entries e2
+                WHERE e2.date = e1.date AND e2.type = 'journal'
+                ORDER BY e2.created_at DESC, e2.rowid DESC
+                LIMIT 1
+            ) AS preview
+        FROM entries e1
+        WHERE e1.type = 'journal'
+        GROUP BY e1.date
+        ORDER BY e1.date DESC
+        """
+    ).fetchall()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # extractions — one L1 row per entry. Created 'pending' at capture time, then
 # finalised to 'done' (with all fields) or 'null_stored' (NULL fields) by the

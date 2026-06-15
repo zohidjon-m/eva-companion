@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import (
@@ -35,7 +36,9 @@ from pydantic import BaseModel, Field
 from net_guard import allow_summary, install_net_guard, is_installed
 
 # Phase 2 capture pipeline (vault + L1 index + background extraction/embedding).
-from memory import capture
+# Phase 5 also reads the L1 index (db) and the L0 day files (vault) directly for
+# the journal browse / read-only day view.
+from memory import capture, db, vault
 
 # Phase 1 LLM runtime: the model-server supervisor and the async client.
 from llm import client as llm_client
@@ -307,6 +310,175 @@ def create_entry(body: EntryIn, background: BackgroundTasks) -> dict:
         raise HTTPException(status_code=400, detail=str(e)) from e
     background.add_task(capture.run_extraction_and_embed, rec.id, rec.text, rec.date)
     return {"id": rec.id, "date": rec.date, "type": rec.type, "word_count": rec.word_count}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 5 — Journaling surface. Journaling is its own ritual, not a chat thread,
+# so it gets its own small API. Saving reuses the Phase-2 capture pipeline
+# verbatim (entry type 'journal', same extraction), the browse list and day view
+# read from the L1 index and the L0 Markdown respectively, and the post-save
+# acknowledgment is one bounded model call in Eva's voice.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# A single-line preview is enough for the browse list; trim long entries.
+_PREVIEW_CHARS = 140
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _preview(text: str | None) -> str:
+    """Collapse an entry to a short single-line teaser for the browse list."""
+    if not text:
+        return ""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= _PREVIEW_CHARS else flat[: _PREVIEW_CHARS - 1].rstrip() + "…"
+
+
+class JournalIn(BaseModel):
+    """Request body for ``POST /journal`` — one saved journal entry."""
+
+    text: str = Field(..., min_length=1, description="The journal entry text.")
+
+
+@app.post("/journal")
+def save_journal(body: JournalIn, background: BackgroundTasks) -> dict:
+    """Save a journal entry and kick off the same background extraction as chat.
+
+    Writes through the Phase-2 capture pipeline with entry type ``journal`` — L0
+    Markdown first (durable the moment this returns), then the L1 index, then
+    extraction + embedding in the background. The response means "saved"; Eva's
+    acknowledgment is a separate, non-blocking call (:func:`acknowledge_journal`)
+    so a slow or absent model never delays the save confirmation.
+    """
+    try:
+        rec = capture.capture_entry(body.text, "journal")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    background.add_task(capture.run_extraction_and_embed, rec.id, rec.text, rec.date)
+    return {
+        "id": rec.id,
+        "date": rec.date,
+        "word_count": rec.word_count,
+        "created_at": rec.created_at,
+    }
+
+
+@app.get("/journal/days")
+def journal_days() -> dict:
+    """List the days that have journal entries, newest first (the browse list).
+
+    Primary source is the L1 index (fast, gives counts + a recent preview). It is
+    then unioned with any day files on disk that the index doesn't know about —
+    e.g. an older entry placed by hand — so the Markdown source of truth is never
+    invisible in the browse list even before it is (re)indexed.
+    """
+    conn = db.get_or_create_db()
+    try:
+        rows = db.list_journal_days(conn)
+    finally:
+        conn.close()
+
+    by_date: dict[str, dict] = {
+        r["date"]: {"date": r["date"], "count": r["count"], "preview": _preview(r["preview"])}
+        for r in rows
+    }
+    for date in vault.list_day_dates():
+        if date in by_date:
+            continue
+        turns = [t for t in vault.read_day(date) if t.type == "journal"]
+        if turns:
+            by_date[date] = {
+                "date": date,
+                "count": len(turns),
+                "preview": _preview(turns[-1].text),
+            }
+
+    days = sorted(by_date.values(), key=lambda d: d["date"], reverse=True)
+    return {"days": days}
+
+
+@app.get("/journal/day/{date}")
+def journal_day(date: str) -> dict:
+    """Return one day's journal entries for the read-only day view.
+
+    Reads the L0 Markdown day file directly (the source of truth), so a
+    hand-placed older file renders correctly without any index entry. Returns the
+    journal turns in written order; 404 if the day has no journal entries.
+    """
+    if not _DATE_RE.match(date):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    turns = [t for t in vault.read_day(date) if t.type == "journal"]
+    if not turns:
+        raise HTTPException(status_code=404, detail="no journal entries for that day")
+    return {
+        "date": date,
+        "entries": [{"id": t.id, "time": t.time, "text": t.text} for t in turns],
+    }
+
+
+class AcknowledgeIn(BaseModel):
+    """Request body for ``POST /journal/acknowledge`` — which entry to reflect on."""
+
+    entry_id: str = Field(..., description="The id returned by POST /journal.")
+
+
+def _entry_text(entry_id: str) -> str | None:
+    """Fetch a saved entry's text from the L1 index, or ``None`` if unknown.
+
+    Uses ``get_or_create_db`` so a lookup against a brand-new vault (no entries
+    yet) returns ``None`` rather than erroring on a missing table.
+    """
+    conn = db.get_or_create_db()
+    try:
+        row = db.get_entry(conn, entry_id)
+    finally:
+        conn.close()
+    return row["text"] if row else None
+
+
+async def _journal_acknowledgment(entry_text: str) -> str | None:
+    """Produce Eva's one-line acknowledgment for a saved entry, or ``None``.
+
+    One bounded, non-streamed model call using the persona-based journal prompt
+    (:func:`prompts.assembly.build_journal_ack_prompt`). Returns ``None`` — never
+    raises — when the model is missing or the call fails, so the acknowledgment is
+    a gentle bonus that can be absent without ever putting the save at risk.
+    Gemma has no system role, so the instruction is folded into the user message
+    exactly as the chat path does.
+    """
+    if not llm_server.model_present():
+        return None
+    system_prompt = assembly.build_journal_ack_prompt()
+    messages = [{"role": "user", "content": f"{system_prompt}\n\n{entry_text}"}]
+    try:
+        # A slightly cooler temperature than chat keeps the reflection grounded in
+        # what they wrote rather than wandering. priority=True so the waiting user
+        # isn't stuck behind this entry's own background extraction.
+        reply = await llm_client.complete_chat(
+            messages,
+            max_tokens=assembly.JOURNAL_ACK_MAX_TOKENS,
+            temp=0.7,
+            priority=True,
+        )
+    except Exception:  # noqa: BLE001 — acknowledgment is best-effort, never fatal
+        log.exception("journal acknowledgment failed (entry still saved)")
+        return None
+    line = " ".join(reply.split()).strip()
+    return line or None
+
+
+@app.post("/journal/acknowledge")
+async def acknowledge_journal(body: AcknowledgeIn) -> dict:
+    """Return one gentle Eva acknowledgment line for a just-saved journal entry.
+
+    Looked up by entry id (so the client can't smuggle in different text than was
+    saved). ``acknowledgment`` is ``null`` when the model is unavailable or the
+    call fails — the entry is already safely saved either way.
+    """
+    text = _entry_text(body.entry_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail="entry not found")
+    return {"acknowledgment": await _journal_acknowledgment(text)}
 
 
 if __name__ == "__main__":

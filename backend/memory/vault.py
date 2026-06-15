@@ -15,6 +15,7 @@ in flight, never history.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -141,3 +142,93 @@ def save_entry(text: str, entry_type: str, *, when: datetime | None = None) -> E
 
     log.info("vault: saved %s turn %s to %s", entry_type, rec.id, path.name)
     return rec
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Read side — parsing the Markdown back out. The day files are the source of
+# truth (CLAUDE.md rule 5), so Phase 5's read-only "time-travel" day view reads
+# them directly rather than the derived SQLite index. This is also what lets a
+# hand-placed older .md file render without ever having been indexed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Matches a YYYY-MM-DD day-file stem so we never treat a stray file as a day.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A turn section header, e.g. "## 09:14:03 · journal".
+_TURN_HEADER_RE = re.compile(r"^## (\d{2}:\d{2}:\d{2}) · (.+)$")
+# The HTML-comment id line that immediately follows a turn header.
+_ID_RE = re.compile(r"^<!-- id: (.+) -->$")
+
+
+@dataclass(frozen=True)
+class DayTurn:
+    """One turn parsed back out of a day file (read-only view).
+
+    Mirrors what :func:`_turn_block` wrote: the turn's id (or ``None`` for a
+    hand-written file that omitted the comment), its time-of-day, its type, and
+    the verbatim body text. Used by the journal browse/day view.
+    """
+
+    id: str | None
+    time: str          # HH:MM:SS
+    type: str          # "chat" | "journal" (whatever the header carried)
+    text: str          # the body, stripped of surrounding blank lines
+
+
+def list_day_dates() -> list[str]:
+    """Return every day-file date present on disk, newest first.
+
+    Reads the journal directory rather than the index, so files that were never
+    indexed (e.g. an older entry placed by hand) are still discoverable. Only
+    ``YYYY-MM-DD.md`` files count; anything else in the folder is ignored.
+    """
+    directory = journal_dir()
+    if not directory.exists():
+        return []
+    dates = [p.stem for p in directory.glob("*.md") if _DATE_RE.match(p.stem)]
+    return sorted(dates, reverse=True)
+
+
+def read_day(date: str) -> list[DayTurn]:
+    """Parse one day's Markdown file into its turns, in written order.
+
+    Returns ``[]`` if the file does not exist. The parse mirrors the write
+    format: a ``## HH:MM:SS · type`` header opens a turn, an optional
+    ``<!-- id: … -->`` comment carries its id, and everything up to the next
+    header is the body. Frontmatter and the ``# DATE`` heading are skipped. This
+    is deliberately forgiving so a lightly hand-edited file still reads.
+    """
+    path = day_file(date)
+    if not path.exists():
+        return []
+
+    turns: list[DayTurn] = []
+    cur: dict | None = None
+    body: list[str] = []
+
+    def flush() -> None:
+        if cur is not None:
+            turns.append(
+                DayTurn(
+                    id=cur["id"],
+                    time=cur["time"],
+                    type=cur["type"],
+                    text="\n".join(body).strip(),
+                )
+            )
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        header = _TURN_HEADER_RE.match(line)
+        if header:
+            flush()
+            cur = {"time": header.group(1), "type": header.group(2).strip(), "id": None}
+            body = []
+            continue
+        if cur is None:
+            continue  # frontmatter / day heading — nothing to collect yet
+        id_match = _ID_RE.match(line.strip())
+        if id_match and cur["id"] is None and not body:
+            cur["id"] = id_match.group(1).strip()
+            continue
+        body.append(line)
+    flush()
+    return turns
