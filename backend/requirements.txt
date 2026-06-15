@@ -12,6 +12,13 @@ PyYAML==6.0.1
 chromadb>=1.5,<2
 fastembed>=0.8,<1
 
+# Phase 6 — corpus ingestion. PDF text extraction (pypdf primary, pdfplumber as
+# a per-page fallback) and multipart parsing for POST /corpus/upload. All local;
+# no network. Markdown/txt need no extra deps.
+pypdf>=6,<7
+pdfplumber>=0.11,<0.12
+python-multipart>=0.0.9
+
 # Phase 1 — model server. We serve Gemma over llama-cpp-python's OpenAI server
 # (`python -m llama_cpp.server`) on :11500. This is a heavy, Metal-compiled
 # build; install with the server extra:
@@ -26,3 +33,6 @@ llama-cpp-python[server]>=0.3.2
 requests==2.32.3
 pytest==8.3.4
 httpx==0.28.1
+# reportlab is test-only: it mints a real PDF fixture for the Phase 6 loader test
+# (which skips itself if reportlab is absent). Not used by the app at runtime.
+reportlab>=4,<5
