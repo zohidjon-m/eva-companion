@@ -2,9 +2,9 @@ import { Button, EmptyState } from "../components";
 import type { SectionId } from "../nav";
 import { ChatScreen } from "../chat/ChatScreen";
 import { JournalScreen } from "../journal/JournalScreen";
+import { LibraryScreen } from "../library/LibraryScreen";
 import {
   InsightsArt,
-  LibraryArt,
   ProfileArt,
   SettingsArt,
 } from "./illustrations";
@@ -37,20 +37,10 @@ function JournalSection() {
 }
 
 function LibrarySection() {
-  return (
-    <EmptyState
-      illustration={<LibraryArt />}
-      eyebrow="Library"
-      title="Hand Eva your books"
-      description="Drop in PDFs, notes, or text and Eva can ground her answers in them — quoting the page, never inventing a source. Your library stays entirely on this Mac."
-      action={
-        <Button variant="primary" disabled>
-          Add a document
-        </Button>
-      }
-      footnote={comingIn("Phase 6")}
-    />
-  );
+  // Phase 6: the real Library surface — drag-and-drop upload, ingest progress,
+  // the document list with chunk counts + status, and remove. Renders inside the
+  // standard content column (under the page header), unlike the flush chat/journal.
+  return <LibraryScreen />;
 }
 
 function InsightsSection() {

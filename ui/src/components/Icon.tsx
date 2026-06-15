@@ -21,7 +21,11 @@ export type IconName =
   | "chevron-down"
   | "sparkle"
   | "feather"
-  | "send";
+  | "send"
+  | "upload"
+  | "file"
+  | "trash"
+  | "alert";
 
 type IconProps = {
   name: IconName;
@@ -93,6 +97,32 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M12 19V6" />
       <path d="M6.5 11.5L12 6l5.5 5.5" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M12 15.5V4.5" />
+      <path d="M8 8.5l4-4 4 4" />
+      <path d="M5 14.5v3A2 2 0 0 0 7 19.5h10a2 2 0 0 0 2-2v-3" />
+    </>
+  ),
+  file: (
+    <>
+      <path d="M13 4H7.5A2 2 0 0 0 5.5 6v12a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V9z" />
+      <path d="M13 4v5h5" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M5 7h14" />
+      <path d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" />
+      <path d="M7.2 7l.8 11a2 2 0 0 0 2 1.9h4a2 2 0 0 0 2-1.9l.8-11" />
+    </>
+  ),
+  alert: (
+    <>
+      <path d="M12 4.5l8.5 14.5H3.5z" />
+      <path d="M12 10v4M12 16.7v.3" />
     </>
   ),
 };

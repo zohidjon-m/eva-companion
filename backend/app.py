@@ -24,7 +24,9 @@ from contextlib import asynccontextmanager
 from fastapi import (
     BackgroundTasks,
     FastAPI,
+    File,
     HTTPException,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -48,6 +50,10 @@ from llm import server as llm_server
 # keyword crisis-care floor that runs before the prompt reaches the model.
 from prompts import assembly
 from safety import crisis_check
+
+# Phase 6 Library: corpus ingestion (save → load → chunk → embed → index) and the
+# document manifest the Library screen lists from.
+from ingest import corpus as corpus_ingest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -479,6 +485,55 @@ async def acknowledge_journal(body: AcknowledgeIn) -> dict:
     if text is None:
         raise HTTPException(status_code=404, detail="entry not found")
     return {"acknowledgment": await _journal_acknowledgment(text)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 6 — Library. The user hands Eva their books; the corpus pipeline is real.
+# Upload runs synchronously (load → chunk → embed → index) so the response means
+# "indexed" and the UI can show its result immediately; the heavy embedding work
+# runs in the threadpool because these are sync `def` handlers. The list and
+# remove endpoints read/mutate the manifest the ingest module owns.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Reject absurdly large uploads before reading them into memory. 50 MB covers a
+# long, image-heavy book while keeping a single upload well inside the 8 GB
+# budget. (We only index the text layer; the bytes themselves are stored as-is.)
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+@app.post("/corpus/upload")
+def corpus_upload(file: UploadFile = File(...)) -> dict:
+    """Ingest one uploaded document and return its record (ready or failed).
+
+    Reads the upload, then runs the full ingest pipeline. A file Eva can't read
+    (corrupt, encrypted, empty, unsupported) comes back with ``status='failed'``
+    and a message — a 200 response, because the *request* succeeded and the
+    Library should show the failure state, not a transport error. A 413 is raised
+    only when the file exceeds the size cap.
+    """
+    data = file.file.read()
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is larger than the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+        )
+    if not data:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    return corpus_ingest.ingest_file(file.filename or "document", data)
+
+
+@app.get("/corpus")
+def corpus_list() -> dict:
+    """List the ingested documents (newest first) with chunk counts and status."""
+    return {"documents": corpus_ingest.list_documents()}
+
+
+@app.delete("/corpus/{doc_id}")
+def corpus_remove(doc_id: str) -> dict:
+    """Remove a document: its chunks, its stored bytes, and its manifest entry."""
+    if not corpus_ingest.remove_document(doc_id):
+        raise HTTPException(status_code=404, detail="document not found")
+    return {"removed": doc_id}
 
 
 if __name__ == "__main__":
