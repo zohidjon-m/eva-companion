@@ -1,9 +1,9 @@
 import { Button, EmptyState } from "../components";
 import type { SectionId } from "../nav";
 import { ChatScreen } from "../chat/ChatScreen";
+import { JournalScreen } from "../journal/JournalScreen";
 import {
   InsightsArt,
-  JournalArt,
   LibraryArt,
   ProfileArt,
   SettingsArt,
@@ -30,20 +30,10 @@ function ChatSection() {
 }
 
 function JournalSection() {
-  return (
-    <EmptyState
-      illustration={<JournalArt />}
-      eyebrow="Journal"
-      title="A blank page, just for you"
-      description="A calm, full-width space to write your day — separate from chat. Save when you're ready and Eva will offer one gentle reflection, never advice you didn't ask for."
-      action={
-        <Button variant="primary" disabled>
-          Write today's entry
-        </Button>
-      }
-      footnote={comingIn("Phase 5")}
-    />
-  );
+  // Phase 5: the real journaling surface. Like chat, it owns a full-height,
+  // flush layout (a browse rail + a calm editor), so the shell renders it
+  // without the centered content column and page header.
+  return <JournalScreen />;
 }
 
 function LibrarySection() {
