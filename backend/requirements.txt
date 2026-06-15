@@ -1,0 +1,28 @@
+# Eva backend dependencies — Phase 0 scaffold.
+# Pinned loosely now; later phases add llama/chromadb/whisper/kokoro deps.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Phase 2 — vault YAML frontmatter (L0 Markdown day files).
+PyYAML==6.0.1
+
+# Phase 2 Step B — L2 semantic index (ChromaDB) + local embeddings (fastembed,
+# bge-small-en-v1.5). The embedding model is downloaded once out-of-band via
+# scripts/download_embed_model.py; runtime is forced offline (see memory/vector.py).
+chromadb>=1.5,<2
+fastembed>=0.8,<1
+
+# Phase 1 — model server. We serve Gemma over llama-cpp-python's OpenAI server
+# (`python -m llama_cpp.server`) on :11500. This is a heavy, Metal-compiled
+# build; install with the server extra:
+#     CMAKE_ARGS="-DGGML_METAL=on" pip install 'llama-cpp-python[server]'
+# backend/llm/server.py launches it as a subprocess and can use any interpreter
+# that has it (set $EVA_LLAMA_PYTHON if not this venv), so it is listed but not
+# strictly required to be in this exact environment.
+llama-cpp-python[server]>=0.3.2
+
+# Test/dev only (Phase 0 socket-guard test uses requests to match the plan).
+# httpx is also the runtime client used by backend/llm/client.py to stream.
+requests==2.32.3
+pytest==8.3.4
+httpx==0.28.1

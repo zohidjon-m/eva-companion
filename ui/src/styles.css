@@ -1,0 +1,111 @@
+/* Phase 0 styling — deliberately minimal. The real design system lands in
+   Phase 3; this is just enough to read the status dot at a glance. */
+
+:root {
+  --bg: #0f1115;
+  --card: #181b22;
+  --text: #e8eaed;
+  --muted: #9aa0a6;
+  --green: #34c759;
+  --red: #ff453a;
+  --amber: #ffd60a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.shell {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 2rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  padding: 2.5rem 3rem;
+  min-width: 320px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+}
+
+h1 {
+  margin: 0;
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  margin: 0.25rem 0 1.75rem;
+  color: var(--muted);
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  font-weight: 500;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.dot--online {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(52, 199, 89, 0.18);
+}
+
+.dot--offline {
+  background: var(--red);
+  box-shadow: 0 0 0 4px rgba(255, 69, 58, 0.18);
+}
+
+.dot--connecting {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(255, 214, 10, 0.18);
+}
+
+.health {
+  margin: 1.5rem 0 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.health div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.health dt {
+  color: var(--muted);
+  margin: 0;
+}
+
+.health dd {
+  margin: 0;
+}
