@@ -20,7 +20,8 @@ export type IconName =
   | "shield-check"
   | "chevron-down"
   | "sparkle"
-  | "feather";
+  | "feather"
+  | "send";
 
 type IconProps = {
   name: IconName;
@@ -86,6 +87,12 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M19 6a5 5 0 0 0-7 0l-6 6v4h4l6-6a5 5 0 0 0 3-4z" />
       <path d="M16 9l-7 7M14.5 6.5L6 15" />
+    </>
+  ),
+  send: (
+    <>
+      <path d="M12 19V6" />
+      <path d="M6.5 11.5L12 6l5.5 5.5" />
     </>
   ),
 };

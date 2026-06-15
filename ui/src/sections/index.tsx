@@ -1,7 +1,7 @@
 import { Button, EmptyState } from "../components";
 import type { SectionId } from "../nav";
+import { ChatScreen } from "../chat/ChatScreen";
 import {
-  ChatArt,
   InsightsArt,
   JournalArt,
   LibraryArt,
@@ -23,20 +23,10 @@ function comingIn(phase: string) {
 }
 
 function ChatSection() {
-  return (
-    <EmptyState
-      illustration={<ChatArt />}
-      eyebrow="Chat"
-      title="Start a conversation"
-      description="This is where you'll talk things through with Eva — out loud or in text. She listens first, remembers what matters, and never sends a word off this device."
-      action={
-        <Button variant="primary" disabled>
-          Say hello
-        </Button>
-      }
-      footnote={comingIn("Phase 4")}
-    />
-  );
+  // Phase 4: the real chat surface, streaming over WS /chat. It manages its own
+  // full-height layout (scroll + pinned composer), so the shell renders it flush
+  // rather than inside the centered content column with a page header.
+  return <ChatScreen />;
 }
 
 function JournalSection() {

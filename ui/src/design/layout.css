@@ -257,6 +257,15 @@
   max-width: var(--content-max);
   margin: 0 auto;
 }
+/* Flush sections (Chat) fill the column and manage their own scroll, so the
+   outer content area neither scrolls nor pads. */
+.content--flush {
+  overflow: hidden;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 .page-head {
   margin-bottom: var(--space-6);
 }

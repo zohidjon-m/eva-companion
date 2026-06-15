@@ -41,6 +41,11 @@ from memory import capture
 from llm import client as llm_client
 from llm import server as llm_server
 
+# Phase 4 chat surface: prompt assembly (the four template slots) + the interim
+# keyword crisis-care floor that runs before the prompt reaches the model.
+from prompts import assembly
+from safety import crisis_check
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -129,47 +134,112 @@ def health() -> dict:
     }
 
 
-def _message_text(raw: str) -> str:
-    """Extract the user text from a ``/chat`` frame.
+def _parse_frame(raw: str) -> tuple[str, bool]:
+    """Parse a ``/chat`` frame into ``(text, capture)``.
 
-    Accepts either a bare string or a JSON object ``{"text": "..."}`` so the
-    socket is friendly to both a quick curl/ws test and the future structured
-    frontend client. Returns the stripped text (possibly empty).
+    Accepts a bare string or a JSON object ``{"text": "...", "capture": true}`` so
+    the socket stays friendly to a quick curl/ws test while letting the frontend
+    ask for a regenerate-without-re-saving turn. ``capture`` defaults to ``True``
+    (every normal turn is saved); the UI sets it ``False`` only when *retrying* a
+    turn whose user text was already persisted, so a retry never duplicates the
+    journal entry. Returns the stripped text (possibly empty).
     """
     raw = raw.strip()
     if raw.startswith("{"):
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
-            return raw
+            return raw, True
         if isinstance(obj, dict):
-            return str(obj.get("text") or obj.get("message") or "").strip()
-    return raw
+            text = str(obj.get("text") or obj.get("message") or "").strip()
+            return text, bool(obj.get("capture", True))
+    return raw, True
+
+
+# How many prior turns of the *current session* to carry into the model so a
+# multi-turn chat stays coherent. 12 = 6 user + 6 Eva turns, comfortably inside
+# the 8192-token chat budget (CLAUDE.md) for short companion replies. Older turns
+# fall out of the model's view but remain in the vault and on screen.
+_MAX_HISTORY_TURNS = 12
+
+
+def _capture_user_turn(text: str) -> None:
+    """Persist one user chat turn (vault + L1) and schedule background extraction.
+
+    Reuses the Phase-2 capture pipeline verbatim, so a chat turn is saved exactly
+    like a ``POST /entry``: L0 Markdown first (the source of truth), then the L1
+    index, then extraction + embedding in the background. Capture runs *before*
+    generation so the entry survives a missing model or a reply interrupted
+    mid-stream. A failure here is logged but never breaks the live reply — the
+    conversation matters more than the derived index, and the L0 write is the part
+    that effectively never fails.
+
+    Note: only the *user's* turns are captured. The vault is the user's journal
+    and the L1 extractor reads the user's words; Eva's replies live in the session
+    history and the model context, not as journal entries.
+    """
+    try:
+        rec = capture.capture_entry(text, "chat")
+    except Exception:  # noqa: BLE001 — capture must never break the reply
+        log.exception("failed to capture chat turn (continuing with reply)")
+        return
+    asyncio.create_task(capture.run_extraction_and_embed(rec.id, rec.text, rec.date))
+
+
+def _compose_messages(system_prompt: str, history: list[dict], user_text: str) -> list[dict]:
+    """Build the OpenAI ``messages`` list, folding the system prompt into turn 1.
+
+    The session ``history`` (alternating user/assistant turns) plus the new user
+    turn form the body. Rather than send a separate ``system`` role — which the
+    gemma-4 GGUF's embedded chat template does not accept — the system prompt is
+    prepended to the *first* message in the window (always a user turn). This is
+    template-agnostic and keeps Eva's persona present even after the oldest turns
+    age out of the window.
+    """
+    turns = [*history, {"role": "user", "content": user_text}]
+    first = turns[0]
+    turns[0] = {**first, "content": f"{system_prompt}\n\n{first['content']}"}
+    return turns
 
 
 @app.websocket("/chat")
 async def chat_ws(ws: WebSocket) -> None:
-    """Streaming chat socket: receive a turn, stream Gemma's tokens back.
+    """Streaming chat socket: receive a turn, stream Eva's tokens back.
 
     Protocol (one turn, repeatable on the same connection):
-      → client sends a text frame (bare text or ``{"text": "..."}``)
+      → client sends a frame (bare text or ``{"text": "...", "capture": bool}``)
       ← ``{"type":"start"}`` then a sequence of ``{"type":"token","content":…}``
       ← ``{"type":"done"}`` when the reply completes
       ← ``{"type":"error","code":…,"message":…}`` on any failure
 
-    Phase 1 sends the user's text straight to the model (no persona/memory yet —
-    those slots arrive in Phase 4). The model server going down or still loading is
-    surfaced as a graceful error frame, never an unhandled crash.
+    Phase 4 wraps the Phase-1 stream with the real chat surface:
+      1. Capture the user's turn (vault + L1) before anything else.
+      2. Run the interim keyword crisis-care scan over the user's text.
+      3. Assemble the system prompt from the four template slots
+         (:mod:`prompts.assembly`), appending the crisis addendum on a match.
+      4. Stream the reply, capped at 450 tokens, with this session's history for
+         multi-turn coherence.
+
+    The model server going down (even mid-reply) or still loading is surfaced as a
+    graceful error frame, never an unhandled crash. ``history`` is per-connection:
+    it lives only for the life of this socket.
     """
     await ws.accept()
+    history: list[dict] = []
     try:
         while True:
-            text = _message_text(await ws.receive_text())
+            text, do_capture = _parse_frame(await ws.receive_text())
             if not text:
                 await ws.send_json(
                     {"type": "error", "code": "empty", "message": "empty message"}
                 )
                 continue
+
+            # 1. Capture first — an absent model or a dropped reply never costs the
+            #    entry. Retries (capture=False) skip this; their text is already saved.
+            if do_capture:
+                _capture_user_turn(text)
+
             if not llm_server.model_present():
                 status = llm_server.model_status()
                 await ws.send_json(
@@ -182,11 +252,18 @@ async def chat_ws(ws: WebSocket) -> None:
                 )
                 continue
 
+            # 2–3. Interim crisis-care scan, then assemble the system prompt.
+            addendum = crisis_check.crisis_addendum() if crisis_check.is_crisis(text) else ""
+            system_prompt = assembly.build_chat_system_prompt(persona_addendum=addendum)
+            messages = _compose_messages(system_prompt, history, text)
+
             await ws.send_json({"type": "start"})
+            reply_parts: list[str] = []
             try:
                 async for piece in llm_client.stream_chat(
-                    [{"role": "user", "content": text}], priority=True
+                    messages, max_tokens=assembly.REPLY_MAX_TOKENS, priority=True
                 ):
+                    reply_parts.append(piece)
                     await ws.send_json({"type": "token", "content": piece})
                 await ws.send_json({"type": "done"})
             except WebSocketDisconnect:
@@ -196,6 +273,13 @@ async def chat_ws(ws: WebSocket) -> None:
                 await ws.send_json(
                     {"type": "error", "code": "model_error", "message": str(exc)}
                 )
+                continue  # don't record a half/failed turn into history
+
+            # 4. Record the completed turn for in-session coherence, bounded.
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": "".join(reply_parts)})
+            if len(history) > _MAX_HISTORY_TURNS:
+                del history[:-_MAX_HISTORY_TURNS]
     except WebSocketDisconnect:
         log.info("chat websocket disconnected")
 

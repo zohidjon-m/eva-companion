@@ -16,6 +16,33 @@ from fastapi.testclient import TestClient
 from app import app
 from llm import client as llm_client
 from llm import server as llm_server
+from memory import capture
+
+
+def _stub_capture(monkeypatch):
+    """Neutralize the Phase-4 capture side-effects for the WS protocol tests.
+
+    The `/chat` socket now persists each user turn and schedules background
+    extraction. These tests are about the wire protocol, not storage, so we stub
+    both halves: capture returns a fake record and extraction is a no-op. Returns
+    a list that records the texts capture was called with, so a test can assert
+    the turn was captured.
+    """
+    captured: list[str] = []
+
+    def fake_capture(text, entry_type):
+        captured.append(text)
+        return capture.vault.EntryRecord(
+            id="t", date="2026-06-16", type=entry_type, text=text,
+            word_count=len(text.split()), created_at="2026-06-16T00:00:00",
+        )
+
+    async def fake_extract(*args, **kwargs):
+        return "done"
+
+    monkeypatch.setattr(capture, "capture_entry", fake_capture)
+    monkeypatch.setattr(capture, "run_extraction_and_embed", fake_extract)
+    return captured
 
 
 # ── server: launch command & status ─────────────────────────────────────────
@@ -142,6 +169,7 @@ def test_ws_chat_streams_tokens(monkeypatch):
 
     monkeypatch.setattr(llm_server, "model_present", lambda: True)
     monkeypatch.setattr(llm_client, "stream_chat", fake_stream)
+    captured = _stub_capture(monkeypatch)
 
     client = TestClient(app)
     with client.websocket_connect("/chat") as ws:
@@ -155,13 +183,18 @@ def test_ws_chat_streams_tokens(monkeypatch):
             assert frame["type"] == "token"
             tokens.append(frame["content"])
     assert "".join(tokens) == "Hello, there!"
+    # The user's turn was captured (Phase 4 wires /chat to the vault pipeline).
+    assert captured == ["hi"]
 
 
 def test_ws_chat_reports_missing_model(monkeypatch):
     monkeypatch.setattr(llm_server, "model_present", lambda: False)
+    captured = _stub_capture(monkeypatch)
     client = TestClient(app)
     with client.websocket_connect("/chat") as ws:
         ws.send_text("hi")
         frame = ws.receive_json()
     assert frame["type"] == "error"
     assert frame["code"] == "model_missing"
+    # An absent model must never cost the entry: capture ran before the check.
+    assert captured == ["hi"]

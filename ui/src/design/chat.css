@@ -1,0 +1,300 @@
+/* =============================================================================
+   Eva — Chat surface (Phase 4)
+   A full-height column: scrollable thread + pinned composer. All values are
+   tokens; the bubbles, typing dots, streaming cursor and toast live here.
+   ========================================================================== */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0; /* allow the scroll region to shrink instead of overflowing */
+  position: relative;
+}
+
+/* --- Scrollable thread ---------------------------------------------------- */
+.chat__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-6) var(--space-4);
+}
+.chat__thread {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* --- Message rows + bubbles ----------------------------------------------- */
+.msg {
+  display: flex;
+  animation: bubble-in var(--dur-base) var(--ease-out) both;
+}
+.msg--user {
+  justify-content: flex-end;
+}
+.msg--eva {
+  justify-content: flex-start;
+}
+
+.bubble {
+  max-width: 78%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  line-height: var(--leading-relaxed);
+  /* Preserve the user's newlines (Shift+Enter) and wrap long words. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.bubble--user {
+  background: var(--accent-soft);
+  color: var(--accent-contrast);
+  border-bottom-right-radius: var(--radius-xs);
+}
+.bubble--eva {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-xs);
+  border-bottom-left-radius: var(--radius-xs);
+}
+.bubble--failed {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+@keyframes bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Streaming cursor (blinks while Eva is mid-reply) --------------------- */
+.bubble__cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  border-radius: var(--radius-full);
+  animation: caret 1s steps(1) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* --- Typing indicator (before the first token) --------------------------- */
+.typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 0;
+}
+.typing__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--text-muted);
+  animation: typing-bounce 1.2s var(--ease-in-out) infinite;
+}
+.typing__dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.typing__dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+/* --- Empty-thread greeting ------------------------------------------------ */
+.chat__greeting {
+  margin: auto;
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 420px;
+  animation: rise var(--dur-slow) var(--ease-out) both;
+}
+.chat__greeting-mark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: var(--space-4);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.chat__greeting-title {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  color: var(--text);
+}
+.chat__greeting-sub {
+  margin-top: var(--space-2);
+  color: var(--text-secondary);
+  line-height: var(--leading-relaxed);
+}
+
+/* --- Error toast ---------------------------------------------------------- */
+.chat__toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--space-9) + var(--space-2));
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: min(560px, calc(100% - var(--space-6)));
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border-strong));
+  box-shadow: var(--shadow-lg);
+  animation: rise var(--dur-base) var(--ease-out) both;
+}
+.chat__toast-text {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.chat__toast-actions {
+  display: flex;
+  gap: var(--space-1);
+  margin-left: auto;
+  flex: none;
+}
+.chat__toast-btn {
+  height: 30px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+.chat__toast-btn:hover {
+  background: var(--accent-hover);
+}
+.chat__toast-btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+.chat__toast-btn--ghost:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* --- Composer ------------------------------------------------------------- */
+.composer {
+  flex: none;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  backdrop-filter: blur(8px);
+  padding: var(--space-3) var(--space-6) var(--space-4);
+}
+.composer__inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.composer__inner:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.composer__field {
+  flex: 1;
+  border: none;
+  background: transparent;
+  resize: none;
+  padding: var(--space-2) 0;
+  max-height: 160px;
+  line-height: var(--leading-normal);
+  color: var(--text);
+}
+.composer__field:focus {
+  outline: none;
+}
+.composer__field::placeholder {
+  color: var(--text-muted);
+}
+.composer__field:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+.composer__send {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.composer__send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.composer__send:active:not(:disabled) {
+  transform: scale(0.95);
+}
+.composer__send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.composer__hint {
+  max-width: var(--content-max);
+  margin: var(--space-2) auto 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .chat__scroll {
+    padding: var(--space-4) var(--space-4) var(--space-3);
+  }
+  .composer {
+    padding: var(--space-3) var(--space-4) var(--space-4);
+  }
+  .bubble {
+    max-width: 88%;
+  }
+}

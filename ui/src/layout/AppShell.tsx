@@ -22,6 +22,10 @@ export function AppShell() {
 
   const item = NAV_ITEMS.find((n) => n.id === active)!;
   const Section = SECTIONS[active];
+  // Chat owns its full-height layout (its own scroll + a pinned composer), so it
+  // renders flush — without the centered content column and page header that the
+  // empty-state sections use.
+  const isFlush = active === "chat";
 
   // Keep the window title in step with the section, the way a native app does.
   useEffect(() => {
@@ -35,14 +39,21 @@ export function AppShell() {
       <div className="app__main">
         <TopBar health={health} theme={theme} onToggleTheme={toggle} />
 
-        <main className="content" key={active}>
-          <div className="content__inner">
-            <header className="page-head">
-              <h1 className="page-head__title">{item.label}</h1>
-              <p className="page-head__blurb">{item.blurb}</p>
-            </header>
+        <main
+          className={`content${isFlush ? " content--flush" : ""}`}
+          key={active}
+        >
+          {isFlush ? (
             <Section />
-          </div>
+          ) : (
+            <div className="content__inner">
+              <header className="page-head">
+                <h1 className="page-head__title">{item.label}</h1>
+                <p className="page-head__blurb">{item.blurb}</p>
+              </header>
+              <Section />
+            </div>
+          )}
         </main>
       </div>
     </div>
