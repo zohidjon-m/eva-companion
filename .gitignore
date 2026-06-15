@@ -1,0 +1,32 @@
+# --- Python backend ---
+backend/.venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# --- Node / frontend ---
+node_modules/
+ui/dist/
+ui/.vite/
+
+# --- Tauri / Rust ---
+ui/src-tauri/target/
+ui/src-tauri/gen/
+
+# --- Packaging spike artifacts ---
+packaging/spike/build/
+packaging/spike/dist/
+packaging/spike/*.spec
+
+# --- Eva runtime data (never committed; user's private vault) ---
+local_vault/
+
+# --- Model weights (multi-GB; fetched first-run via scripts/download_model_mac.sh) ---
+models/*.gguf
+models/_moved.gguf.bak
+
+# --- OS / editor noise ---
+.DS_Store
+*.log
