@@ -133,6 +133,31 @@ python ../scripts/check_net_guard.py
 PYTHON=backend/.venv/bin/python bash packaging/spike/build_spike.sh
 ```
 
+## Demo day (Phase 15)
+
+Three entrypoints get you from any state to a presentable demo, plus the
+beat-by-beat script:
+
+```sh
+# 1. Reset the vault to the known demo state (backs up real data first).
+#    Seeds ~3 weeks of mood + the knowledge graph + the L3 profile + the demo
+#    book; preserves models/ and settings.json. Prints READY / NOT READY.
+backend/.venv/bin/python scripts/demo_reset.py --yes
+
+# 2. Prove every failure mode fails soft (model down, over-cap upload/audio,
+#    rapid-fire, offline guard). Prints a PASS/FAIL report; CI form is
+#    backend/tests/test_failure_drills.py.
+backend/.venv/bin/python scripts/demo_drills.py
+
+# 3. Launch in demo mode (optionally reset first), then follow DEMO_SCRIPT.md.
+./run_demo.sh --reset
+```
+
+- **`DEMO_SCRIPT.md`** — the one-page, 10-beat walkthrough with a fallback per beat.
+- **`packaging/build_macos.sh`** — builds the `.app`/`.dmg` (needs Rust/`cargo`).
+- **`packaging/CLEAN_MACHINE_CHECKLIST.md`** — verify the bundle cold on a fresh
+  macOS account, twice (one run Wi-Fi off), one deliberate failure per category.
+
 ## The network guard
 
 `backend/net_guard.py` monkeypatches `socket.connect`/`connect_ex` so any
