@@ -1,5 +1,7 @@
 import { useEffect, useRef, type KeyboardEvent } from "react";
 import { Icon } from "../components";
+import { MicButton } from "../voice/MicButton";
+import { appendTranscript } from "../voice/text";
 import { useJournal, type AckState, type UseJournal } from "./useJournal";
 import type { DayEntry, JournalDay } from "./api";
 
@@ -117,6 +119,15 @@ function Writer({ journal: j }: { journal: UseJournal }) {
 
   const canSave = j.draft.trim().length > 0 && !j.saving;
 
+  // Dictation appends to the draft for the user to read over and edit before they
+  // explicitly Save — the spoken path stays the same ritual as typing, just with
+  // the words captured by voice. setDraft is the raw state setter, so the updater
+  // form keeps this correct even if several transcripts land in quick succession.
+  const onTranscribed = (text: string) => {
+    j.setDraft((d) => appendTranscript(d, text));
+    taRef.current?.focus();
+  };
+
   return (
     <div className="journal__editor">
       <div className="journal__editor-scroll">
@@ -141,7 +152,10 @@ function Writer({ journal: j }: { journal: UseJournal }) {
       </div>
 
       <div className="journal__footer">
-        <span className="journal__autosave">{autosaveLabel(j.draft, j.draftSavedAt)}</span>
+        <div className="journal__footer-left">
+          <MicButton onTranscribed={onTranscribed} disabled={j.saving} />
+          <span className="journal__autosave">{autosaveLabel(j.draft, j.draftSavedAt)}</span>
+        </div>
         <button className="btn btn--primary btn--md" onClick={j.save} disabled={!canSave}>
           {j.saving ? "Saving…" : "Save entry"}
         </button>

@@ -28,6 +28,13 @@ python-multipart>=0.0.9
 # strictly required to be in this exact environment.
 llama-cpp-python[server]>=0.3.2
 
+# Phase 8 — voice in (push-to-talk STT). faster-whisper runs Whisper on
+# CTranslate2 (CPU/int8 on Apple Silicon — no Metal backend). It pulls PyAV for
+# audio decoding, so no system ffmpeg is required. Weights (base.en / small.en)
+# download to <vault>/models/whisper on first use (the only permitted STT network
+# call) or out-of-band via scripts/download_whisper_model.py.
+faster-whisper>=1.0,<2
+
 # Test/dev only (Phase 0 socket-guard test uses requests to match the plan).
 # httpx is also the runtime client used by backend/llm/client.py to stream.
 requests==2.32.3

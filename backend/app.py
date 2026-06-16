@@ -60,6 +60,11 @@ from safety import crisis_check
 # document manifest the Library screen lists from.
 from ingest import corpus as corpus_ingest
 
+# Phase 8 Voice-in: push-to-talk STT (faster-whisper, lazy-loaded on first /stt)
+# and the single settings store whose whisper-size knob it reads.
+import settings as app_settings
+from voice import stt
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -574,6 +579,99 @@ def corpus_remove(doc_id: str) -> dict:
     if not corpus_ingest.remove_document(doc_id):
         raise HTTPException(status_code=404, detail="document not found")
     return {"removed": doc_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 8 — Voice in (push-to-talk STT) + the settings knob behind it.
+#
+# POST /stt takes a recorded clip and returns text; the UI drops that text into
+# the input box for the user to confirm, then sends it through the normal /chat or
+# /journal pipeline — so a spoken turn is captured/extracted/grounded exactly like
+# a typed one. The handler is a sync `def`, so FastAPI runs the (CPU-bound, model-
+# loading) transcription in the threadpool and never blocks the async chat path
+# (§8: the real-time chat path has priority). The model is lazy-loaded inside
+# voice/stt.py on the first call here — never at startup (§4 memory budget).
+#
+# GET/PATCH /settings expose the single settings store (§9). Phase 8 wires one
+# knob — the whisper model size — read live by stt.py so a change takes effect on
+# the next transcription; Phase 10's Settings screen extends the same store.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# An over-cap or pathological upload is rejected before it reaches whisper. 120 s
+# of 16-bit mono at 48 kHz in a compressed container is well under this; the
+# generous ceiling just stops a multi-hundred-MB blob from being read into RAM.
+_MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+@app.post("/stt")
+def stt_transcribe(file: UploadFile = File(...)) -> dict:
+    """Transcribe one push-to-talk recording to text.
+
+    Returns ``{"text", "duration", "model_size"}``. The first call lazy-loads
+    faster-whisper (and downloads its weights if absent — the only permitted STT
+    network call); later calls reuse the resident model, reloading only when the
+    whisper size in Settings changes. Failures degrade gracefully, never crash:
+      * empty upload → 400;
+      * clip over the 120 s cap → 413 (cap also enforced in the UI);
+      * model unavailable (absent + offline) → 503 with a "keep typing" message.
+    """
+    data = file.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="The recording was empty.")
+    if len(data) > _MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Recording exceeds the {_MAX_AUDIO_BYTES // (1024 * 1024)} MB limit.",
+        )
+    try:
+        return stt.transcribe(data)
+    except stt.AudioTooLong as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except stt.STTUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — a bad clip is a 400, not a 500
+        log.exception("transcription failed")
+        raise HTTPException(
+            status_code=400, detail="Could not read that recording. Please try again."
+        ) from exc
+
+
+@app.get("/settings")
+def get_settings() -> dict:
+    """Return the current settings plus the valid choices for closed-set knobs.
+
+    The ``options`` block lets the Settings UI render the whisper-size dropdown
+    straight from the backend, so the list of sizes lives in exactly one place.
+    """
+    return {"settings": app_settings.load(), "options": app_settings.options()}
+
+
+class SettingsPatch(BaseModel):
+    """Partial settings update. Only the whisper size is wired in Phase 8."""
+
+    whisper_model_size: str | None = Field(
+        None, description="faster-whisper model size: 'base.en' or 'small.en'."
+    )
+
+
+@app.patch("/settings")
+def patch_settings(body: SettingsPatch) -> dict:
+    """Apply a partial settings update and return the new settings.
+
+    Only keys explicitly sent are changed. An invalid value (e.g. an unknown
+    whisper size) is a 400 — :func:`settings.update` validates against the allowed
+    set. The change is persisted to ``<vault>/settings.json``; ``stt.py`` reads the
+    whisper size on its next transcription, so switching size takes effect on the
+    next utterance with no restart (and is logged when the reload happens).
+    """
+    patch = body.model_dump(exclude_none=True)
+    if not patch:
+        return {"settings": app_settings.load(), "options": app_settings.options()}
+    try:
+        updated = app_settings.update(patch)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"settings": updated, "options": app_settings.options()}
 
 
 if __name__ == "__main__":

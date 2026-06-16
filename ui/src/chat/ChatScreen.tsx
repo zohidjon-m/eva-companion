@@ -6,6 +6,8 @@ import {
   type KeyboardEvent,
 } from "react";
 import { Icon } from "../components";
+import { MicButton } from "../voice/MicButton";
+import { appendTranscript } from "../voice/text";
 import { useChat, type Citation, type Message } from "./useChat";
 
 /**
@@ -235,6 +237,14 @@ function Composer({
     setValue("");
   };
 
+  // A finished transcription lands in the box for the user to confirm and edit —
+  // it is never auto-sent, so a spoken turn goes through the exact same review +
+  // submit path as a typed one. Appends to whatever is already there.
+  const onTranscribed = (text: string) => {
+    setValue((v) => appendTranscript(v, text));
+    taRef.current?.focus();
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter sends; Shift+Enter inserts a newline.
     if (e.key === "Enter" && !e.shiftKey) {
@@ -257,6 +267,7 @@ function Composer({
           onKeyDown={onKeyDown}
           aria-label="Message Eva"
         />
+        <MicButton onTranscribed={onTranscribed} disabled={disabled} />
         <button
           className="composer__send"
           onClick={submit}
