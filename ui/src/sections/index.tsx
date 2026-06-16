@@ -78,9 +78,9 @@ function ProfileSection() {
 }
 
 function SettingsSection() {
-  // Phase 8: the first real, wired control — the Whisper speech-to-text model
-  // size. Renders in the standard content column under the page header; the rest
-  // of the settings store arrives in Phase 10.
+  // Phase 10: the real configuration surface — voice (on/off, speed, whisper
+  // size), privacy (live offline guard + audit), the vault location, and model
+  // status. Renders in the standard content column under the page header.
   return <SettingsScreen />;
 }
 

@@ -204,3 +204,122 @@
   right: auto;
   left: 0;
 }
+
+/* =============================================================================
+   Eva — Voice out (Phase 9)
+   The top-bar voice on/off toggle, the stop-speaking button shown while Eva is
+   talking, and the soft "voice not set up" notice. The toggle matches the other
+   top-bar icon buttons; "on" tints it with the accent so the state reads at a
+   glance.
+   ========================================================================== */
+.voice-ctl {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.voice-ctl__toggle {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.voice-ctl__toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.voice-ctl__toggle--on {
+  color: var(--accent);
+  border-color: var(--accent-soft);
+  background: var(--accent-soft);
+}
+
+/* A soft halo around the speaker icon while audio is actually playing. */
+.voice-ctl__pulse {
+  position: absolute;
+  inset: 4px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: voice-pulse 1.5s var(--ease-in-out) infinite;
+  pointer-events: none;
+}
+@keyframes voice-pulse {
+  0%, 100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.05);
+  }
+}
+
+.voice-ctl__stop {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.voice-ctl__stop:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* The "voice isn't set up" notice drops below the toggle, like the mic panel. */
+.voice-ctl__notice {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 40;
+  min-width: 220px;
+  max-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+  animation: rise var(--dur-base) var(--ease-out) both;
+}
+.voice-ctl__notice-text {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text);
+}
+.voice-ctl__notice-dismiss {
+  align-self: flex-end;
+  height: 26px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.voice-ctl__notice-dismiss:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}

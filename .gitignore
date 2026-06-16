@@ -27,6 +27,10 @@ local_vault/
 models/*.gguf
 models/_moved.gguf.bak
 
+# --- Self-test artifacts (scripts/try_eva.py generates these on each run) ---
+scripts/_eva_voice.wav
+scripts/_eva_testbook.txt
+
 # --- OS / editor noise ---
 .DS_Store
 *.log

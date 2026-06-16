@@ -26,7 +26,10 @@ export type IconName =
   | "file"
   | "trash"
   | "alert"
-  | "mic";
+  | "mic"
+  | "speaker"
+  | "speaker-off"
+  | "stop";
 
 type IconProps = {
   name: IconName;
@@ -133,6 +136,19 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M12 17.5V21M9 21h6" />
     </>
   ),
+  speaker: (
+    <>
+      <path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4z" />
+      <path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11" />
+    </>
+  ),
+  "speaker-off": (
+    <>
+      <path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4z" />
+      <path d="M16 9.5l4 5M20 9.5l-4 5" />
+    </>
+  ),
+  stop: <rect x="6" y="6" width="12" height="12" rx="2.5" />,
 };
 
 export function Icon({ name, size = 20, className, label }: IconProps) {

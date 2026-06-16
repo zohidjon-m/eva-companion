@@ -40,6 +40,15 @@ _installed = False
 _allow_name: str | None = None
 _allow_ips: set[str] = set()
 
+# Violation bookkeeping — the truth behind the Offline ✓ badge (Phase 10). The
+# guard already *blocks* a forbidden connection from day one; here we also *count*
+# every block and remember the most recent target so the UI can turn the badge
+# warning-red the instant anything tries to phone home. State is process-local and
+# in-memory only (no file, no network) — it resets when the backend restarts,
+# which is the right scope for "has anything tried to leave during this run?".
+_violations = 0
+_last_blocked: str | None = None
+
 
 class OutboundBlocked(OSError):
     """Raised when code attempts a forbidden outbound network connection.
@@ -95,13 +104,16 @@ def _is_allowed(host: str | None) -> bool:
 
 
 def _deny(address: object) -> "OutboundBlocked":
-    """Log a blocked attempt and build the exception to raise."""
+    """Record + log a blocked attempt and build the exception to raise."""
+    global _violations, _last_blocked
+    host = _host_from_address(address)
+    _violations += 1
+    _last_blocked = host
     log.error(
         "net_guard: BLOCKED outbound connection to %r (privacy hard law; "
         "set EVA_ALLOW_HOST to permit a first-run download host)",
         address,
     )
-    host = _host_from_address(address)
     return OutboundBlocked(
         f"Eva net guard blocked an outbound connection to {host!r}. "
         "Runtime network access is forbidden; only a first-run download to "
@@ -168,10 +180,38 @@ def is_installed() -> bool:
     return _installed
 
 
+def violations() -> int:
+    """Return how many forbidden outbound connections have been blocked this run.
+
+    Zero is the healthy resting state; any positive number means something tried
+    to leave the box and the guard stopped it. The Offline ✓ badge reads this to
+    turn warning-red, making "nothing phones home" a visibly enforced promise.
+    """
+    return _violations
+
+
+def reset_violations() -> None:
+    """Clear the violation counter and last-blocked host. For tests/diagnostics.
+
+    The guard itself stays installed; only the bookkeeping is reset. Not exposed
+    over HTTP — wiping the privacy record shouldn't be a remote action.
+    """
+    global _violations, _last_blocked
+    _violations = 0
+    _last_blocked = None
+
+
 def allow_summary() -> dict:
-    """Return the current allow-list state for diagnostics and the /health view."""
+    """Return the current allow-list + violation state for /health and the audit.
+
+    ``violations`` and ``last_blocked`` let the UI show not just *that* the guard
+    is installed but whether anything has actually been blocked during this run —
+    the difference between "configured" and "verified holding".
+    """
     return {
         "installed": _installed,
         "allow_host": _allow_name,
         "allow_ips": sorted(_allow_ips),
+        "violations": _violations,
+        "last_blocked": _last_blocked,
     }

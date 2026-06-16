@@ -133,6 +133,139 @@
   color: var(--text-muted);
 }
 
+/* --- Phase 10 controls ---------------------------------------------------- */
+
+/* Stacked rows within a group get a hairline separator for rhythm. */
+.settings__group .settings__row + .settings__row {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.settings__status--row {
+  margin-top: var(--space-3);
+  text-align: right;
+}
+
+.settings__muted {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.settings__muted--small {
+  font-size: var(--text-xs);
+}
+
+/* On/off switch */
+.settings__switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.settings__switch-track {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: var(--radius-full);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
+  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
+}
+.settings__switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-xs);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+.settings__switch--on .settings__switch-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.settings__switch--on .settings__switch-thumb {
+  transform: translateX(18px);
+}
+.settings__switch:focus-visible {
+  outline: none;
+}
+.settings__switch:focus-visible .settings__switch-track {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.settings__switch-label {
+  min-width: 1.6em;
+}
+
+/* Speed slider */
+.settings__slider {
+  width: 220px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.settings__slider:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Read-only path display (vault + model file) */
+.settings__vault {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+.settings__path {
+  display: block;
+  max-width: 320px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  word-break: break-all;
+  text-align: left;
+}
+.settings__path--sm {
+  max-width: 320px;
+}
+
+/* Privacy audit */
+.settings__audit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.settings__audit-verdict {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  flex: 1;
+  min-width: 200px;
+}
+
+@media (max-width: 560px) {
+  .settings__slider,
+  .settings__path {
+    width: 100%;
+    max-width: none;
+  }
+  .settings__vault {
+    align-items: stretch;
+    width: 100%;
+  }
+}
+
 @media (max-width: 560px) {
   .settings__row {
     flex-direction: column;

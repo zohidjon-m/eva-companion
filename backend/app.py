@@ -40,7 +40,7 @@ from net_guard import allow_summary, install_net_guard, is_installed
 # Phase 2 capture pipeline (vault + L1 index + background extraction/embedding).
 # Phase 5 also reads the L1 index (db) and the L0 day files (vault) directly for
 # the journal browse / read-only day view.
-from memory import capture, db, vault
+from memory import capture, db, vault, vault_dir
 
 # Phase 7 RAG: the intent gate (listen-first — only question/advice_request pull
 # the corpus) and corpus retrieval (relevant, cited passages or nothing).
@@ -62,8 +62,12 @@ from ingest import corpus as corpus_ingest
 
 # Phase 8 Voice-in: push-to-talk STT (faster-whisper, lazy-loaded on first /stt)
 # and the single settings store whose whisper-size knob it reads.
+# Phase 9 Voice-out: Kokoro TTS (lazy-loaded on the first voiced turn) driven by
+# the streaming sentence queue, which splits Eva's reply at §7.5 boundaries and
+# emits ordered audio frames over this same /chat socket alongside the text.
 import settings as app_settings
-from voice import stt
+from voice import stt, tts
+from voice.sentence_queue import VoiceStream
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,8 +143,10 @@ def health() -> dict:
     ``model`` block (expected path, endpoint, and a download hint if it is
     missing) so the shell can guide first-run setup without crashing. The model
     server may still be loading even when present, so ``model_server_running``
-    reflects whether the supervised subprocess is alive. ``net_guard`` is included
-    so the future Offline ✓ badge (Phase 10) can read the truth from the backend.
+    reflects whether the supervised subprocess is alive. ``net_guard`` and its
+    detail (incl. how many outbound calls have been blocked this run) feed the
+    Offline ✓ badge. ``voices`` reports whether the STT/TTS weights are already
+    cached, so the Phase-10 first-run setup screen can show a live "ready ✓".
     """
     status = llm_server.model_status()
     return {
@@ -150,29 +156,37 @@ def health() -> dict:
         "model_server_running": _llama.is_running(),
         "net_guard": is_installed(),
         "net_guard_detail": allow_summary(),
+        "voices": {"stt": stt.weights_present(), "tts": tts.weights_present()},
     }
 
 
-def _parse_frame(raw: str) -> tuple[str, bool]:
-    """Parse a ``/chat`` frame into ``(text, capture)``.
+def _parse_frame(raw: str) -> tuple[str, bool, bool]:
+    """Parse a ``/chat`` frame into ``(text, capture, voice)``.
 
-    Accepts a bare string or a JSON object ``{"text": "...", "capture": true}`` so
-    the socket stays friendly to a quick curl/ws test while letting the frontend
-    ask for a regenerate-without-re-saving turn. ``capture`` defaults to ``True``
-    (every normal turn is saved); the UI sets it ``False`` only when *retrying* a
-    turn whose user text was already persisted, so a retry never duplicates the
-    journal entry. Returns the stripped text (possibly empty).
+    Accepts a bare string or a JSON object
+    ``{"text": "...", "capture": true, "voice": false}`` so the socket stays
+    friendly to a quick curl/ws test while letting the frontend control two flags:
+
+    * ``capture`` (default ``True``) — every normal turn is saved; the UI sets it
+      ``False`` only when *retrying* a turn whose user text was already persisted,
+      so a retry never duplicates the journal entry.
+    * ``voice`` (default ``False``) — whether to synthesize Eva's reply to speech
+      for this turn (Phase 9). The UI sets it from the top-bar voice toggle; a bare
+      text frame (or any client that doesn't ask) gets text only, so the heavy TTS
+      path is opt-in per turn and the 8 GB budget is respected when voice is off.
+
+    Returns the stripped text (possibly empty) with both flags resolved.
     """
     raw = raw.strip()
     if raw.startswith("{"):
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
-            return raw, True
+            return raw, True, False
         if isinstance(obj, dict):
             text = str(obj.get("text") or obj.get("message") or "").strip()
-            return text, bool(obj.get("capture", True))
-    return raw, True
+            return text, bool(obj.get("capture", True)), bool(obj.get("voice", False))
+    return raw, True, False
 
 
 # How many prior turns of the *current session* to carry into the model so a
@@ -244,6 +258,10 @@ async def chat_ws(ws: WebSocket) -> None:
       5. If passages were retrieved, send a ``citations`` frame so the UI can show
          source chips; then stream the reply, capped at 450 tokens, with this
          session's history for multi-turn coherence.
+      6. (Phase 9) If the turn asked for voice, a :class:`VoiceStream` splits the
+         streamed reply at §7.5 sentence boundaries and emits ordered ``audio``
+         frames over this same socket alongside the text; ``audio_done`` follows
+         the text ``done`` once the last sentence has been synthesized.
 
     The model server going down (even mid-reply) or still loading is surfaced as a
     graceful error frame, never an unhandled crash. ``history`` is per-connection:
@@ -251,11 +269,22 @@ async def chat_ws(ws: WebSocket) -> None:
     """
     await ws.accept()
     history: list[dict] = []
+
+    # All sends on this socket are serialized through one lock. The Phase-9
+    # VoiceStream worker emits audio frames from a separate coroutine while the main
+    # loop writes text tokens; without the lock the two could interleave mid-frame
+    # on the single WebSocket. Every send below goes through ``emit``.
+    send_lock = asyncio.Lock()
+
+    async def emit(frame: dict) -> None:
+        async with send_lock:
+            await ws.send_json(frame)
+
     try:
         while True:
-            text, do_capture = _parse_frame(await ws.receive_text())
+            text, do_capture, want_voice = _parse_frame(await ws.receive_text())
             if not text:
-                await ws.send_json(
+                await emit(
                     {"type": "error", "code": "empty", "message": "empty message"}
                 )
                 continue
@@ -267,7 +296,7 @@ async def chat_ws(ws: WebSocket) -> None:
 
             if not llm_server.model_present():
                 status = llm_server.model_status()
-                await ws.send_json(
+                await emit(
                     {
                         "type": "error",
                         "code": "model_missing",
@@ -306,25 +335,47 @@ async def chat_ws(ws: WebSocket) -> None:
             )
             messages = _compose_messages(system_prompt, history, text)
 
-            await ws.send_json({"type": "start"})
+            await emit({"type": "start"})
             # 5. Surface citations (if any) before the tokens, so the chips can
             #    render alongside the bubble. No frame when nothing was retrieved —
             #    a "not in your library" answer therefore carries no chips at all.
             if citations:
-                await ws.send_json({"type": "citations", "citations": citations})
+                await emit({"type": "citations", "citations": citations})
+
+            # 6. (Phase 9) When this turn asked for voice, spin up a VoiceStream: it
+            #    feeds each token into the §7.5 sentence splitter and synthesizes
+            #    completed sentences on a worker, emitting ordered ``audio`` frames
+            #    over this socket while the text keeps streaming. Voice is per-turn
+            #    and lazy — no Kokoro load happens unless want_voice is set.
+            voice = VoiceStream(tts.synthesize, emit) if want_voice else None
             reply_parts: list[str] = []
             try:
                 async for piece in llm_client.stream_chat(
                     messages, max_tokens=assembly.REPLY_MAX_TOKENS, priority=True
                 ):
                     reply_parts.append(piece)
-                    await ws.send_json({"type": "token", "content": piece})
-                await ws.send_json({"type": "done"})
+                    await emit({"type": "token", "content": piece})
+                    if voice is not None:
+                        await voice.feed(piece)
+                # Text is complete: tell the UI to drop the streaming cursor now,
+                # before we wait on any still-synthesizing audio.
+                await emit({"type": "done"})
+                if voice is not None:
+                    # Drain the splitter's final sentence(s), let the worker finish
+                    # synthesizing, then signal that no more audio will arrive.
+                    await voice.finish()
+                    await emit({"type": "audio_done"})
             except WebSocketDisconnect:
+                if voice is not None:
+                    voice.stop()
+                    await voice.finish()
                 raise
             except Exception as exc:  # noqa: BLE001 — surface as a graceful frame
                 log.exception("chat stream failed")
-                await ws.send_json(
+                if voice is not None:
+                    voice.stop()  # skip pending synthesis; the turn is aborting
+                    await voice.finish()
+                await emit(
                     {"type": "error", "code": "model_error", "message": str(exc)}
                 )
                 continue  # don't record a half/failed turn into history
@@ -636,21 +687,44 @@ def stt_transcribe(file: UploadFile = File(...)) -> dict:
         ) from exc
 
 
+def _settings_response(settings: dict) -> dict:
+    """Bundle the settings with the metadata the Settings screen renders against.
+
+    Alongside the values: ``options`` (closed-set choices, for the whisper-size
+    dropdown), ``ranges`` (numeric bounds, for the voice-speed slider), and
+    ``vault_path`` (read-only display of where the user's data lives, with an
+    "open in Finder" affordance). Model status and voice-weight presence are read
+    from ``/health`` instead, so they are not duplicated here.
+    """
+    return {
+        "settings": settings,
+        "options": app_settings.options(),
+        "ranges": app_settings.ranges(),
+        "vault_path": str(vault_dir()),
+    }
+
+
 @app.get("/settings")
 def get_settings() -> dict:
-    """Return the current settings plus the valid choices for closed-set knobs.
-
-    The ``options`` block lets the Settings UI render the whisper-size dropdown
-    straight from the backend, so the list of sizes lives in exactly one place.
-    """
-    return {"settings": app_settings.load(), "options": app_settings.options()}
+    """Return the current settings plus the choices/ranges/paths the UI renders."""
+    return _settings_response(app_settings.load())
 
 
 class SettingsPatch(BaseModel):
-    """Partial settings update. Only the whisper size is wired in Phase 8."""
+    """Partial settings update — Phase 10 extends Phase 8's single whisper knob.
+
+    Every field is optional; only the ones sent are changed. ``None`` means
+    "leave unchanged" and is stripped before the store sees the patch.
+    """
 
     whisper_model_size: str | None = Field(
         None, description="faster-whisper model size: 'base.en' or 'small.en'."
+    )
+    voice_enabled: bool | None = Field(
+        None, description="Whether Eva speaks her replies (persists the voice toggle)."
+    )
+    voice_speed: float | None = Field(
+        None, description="Eva's speaking rate (Kokoro speed); 1.0 is natural pace."
     )
 
 
@@ -658,20 +732,81 @@ class SettingsPatch(BaseModel):
 def patch_settings(body: SettingsPatch) -> dict:
     """Apply a partial settings update and return the new settings.
 
-    Only keys explicitly sent are changed. An invalid value (e.g. an unknown
-    whisper size) is a 400 — :func:`settings.update` validates against the allowed
-    set. The change is persisted to ``<vault>/settings.json``; ``stt.py`` reads the
-    whisper size on its next transcription, so switching size takes effect on the
-    next utterance with no restart (and is logged when the reload happens).
+    Only keys explicitly sent are changed. An invalid value (an unknown whisper
+    size, or a speed out of range) is a 400 — :func:`settings.update` validates
+    against the allowed set/range. The change is persisted to
+    ``<vault>/settings.json`` and read live by its consumer: ``stt.py`` picks up a
+    whisper size on the next transcription, and ``tts.py`` the speed on the next
+    sentence — both with no restart.
     """
     patch = body.model_dump(exclude_none=True)
     if not patch:
-        return {"settings": app_settings.load(), "options": app_settings.options()}
+        return _settings_response(app_settings.load())
     try:
         updated = app_settings.update(patch)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"settings": updated, "options": app_settings.options()}
+    return _settings_response(updated)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 10 — Privacy audit + vault reveal.
+#
+# The Offline ✓ badge reads the guard state from /health; this endpoint is the
+# on-demand "prove it" the Settings privacy panel calls — it reports whether the
+# outbound block is installed and, crucially, whether anything has been blocked
+# this run (the difference between "configured" and "verified holding"). The
+# vault-reveal endpoint opens the user's data folder in their file manager — a
+# local OS action on a fixed, non-user-supplied path, never a network call.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/privacy/audit")
+def privacy_audit() -> dict:
+    """Report the live outbound-network guard state for the privacy panel.
+
+    Returns the guard summary (installed?, allow-listed download host, and the
+    count + last target of any blocked attempts) plus a plain-English verdict the
+    UI can show verbatim. No active probing — the guard is always live, so its
+    own bookkeeping is the audit (EVA_SYSTEM_DESIGN §9, §11 ``/privacy/audit``).
+    """
+    summary = allow_summary()
+    if not summary["installed"]:
+        verdict = "Outbound network guard is NOT active."
+    elif summary["violations"]:
+        verdict = (
+            f"Guard active and holding: {summary['violations']} outbound "
+            "attempt(s) were blocked this session."
+        )
+    else:
+        verdict = "Guard active. No outbound connection has been attempted this session."
+    return {"verdict": verdict, **summary}
+
+
+@app.post("/vault/reveal")
+def vault_reveal() -> dict:
+    """Open the vault directory in the OS file manager (macOS ``open``).
+
+    A convenience for the Settings "vault location" row so the user can see their
+    own plain-Markdown data without hunting for the path. The path is fixed
+    (:func:`memory.vault_dir`), never client-supplied, so there is nothing to
+    inject. Returns the path either way; ``opened`` says whether the file manager
+    was launched (false on a non-macOS host or if the directory doesn't exist yet).
+    """
+    import subprocess
+    import sys
+
+    path = vault_dir()
+    if not path.exists():
+        return {"path": str(path), "opened": False, "reason": "vault not created yet"}
+    if sys.platform != "darwin":
+        return {"path": str(path), "opened": False, "reason": "reveal is macOS-only"}
+    try:
+        subprocess.run(["open", str(path)], check=True, timeout=5)
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.warning("vault reveal failed: %s", exc)
+        return {"path": str(path), "opened": False, "reason": "could not open Finder"}
+    return {"path": str(path), "opened": True}
 
 
 if __name__ == "__main__":

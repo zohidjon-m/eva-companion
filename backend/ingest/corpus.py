@@ -99,6 +99,35 @@ def _safe_name(filename: str) -> str:
     return cleaned or "document"
 
 
+def _friendly_ingest_error(exc: Exception) -> str:
+    """Turn an unexpected ingest exception into an actionable, user-facing reason.
+
+    The most common *real* cause of a non-LoaderError failure is the embedding
+    model not being available: it loads (fastembed → bge-small) only when the
+    weights are cached, and the runtime is offline, so a cold/cleared cache raises
+    a HuggingFace ``LocalEntryNotFoundError`` deep in the embed step. Mapping that
+    to a clear "run the download script" message (instead of the old opaque
+    "Something went wrong") is what lets a user actually fix it — the full
+    traceback is still logged for diagnosis.
+    """
+    needle = f"{type(exc).__name__}: {exc}".lower()
+    # fastembed raises ValueError("Could not load model ... from any source.") when
+    # the bge-small weights aren't cached and the runtime can't fetch them (offline
+    # + net-guard). Match that, plus the HuggingFace offline-miss for good measure.
+    if (
+        "could not load model" in needle
+        or "from any source" in needle
+        or "localentrynotfound" in needle
+        or "bge-small" in needle
+    ):
+        return (
+            "Eva's embedding model isn't set up, so this file can't be indexed. "
+            "Run:  backend/.venv/bin/python scripts/download_embed_model.py  "
+            "(one-time, needs internet), then try again."
+        )
+    return "Something went wrong while processing this file."
+
+
 def ingest_file(filename: str, data: bytes) -> dict:
     """Ingest one uploaded file end-to-end and record it in the manifest.
 
@@ -144,7 +173,7 @@ def ingest_file(filename: str, data: bytes) -> dict:
         log.warning("ingest failed for '%s': %s", doc["filename"], e)
     except Exception as e:  # noqa: BLE001 — never let an upload crash the server
         doc["status"] = "failed"
-        doc["error"] = "Something went wrong while processing this file."
+        doc["error"] = _friendly_ingest_error(e)
         _safe_unlink(stored_path)
         log.exception("unexpected ingest error for '%s': %s", doc["filename"], e)
 

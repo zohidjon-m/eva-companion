@@ -10,19 +10,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *   - recover from a dropped socket: surface an error, auto-reconnect, and let
  *     the user retry the turn that was in flight (without re-saving it)
  *
- * The backend protocol (Phase 1/4):
- *   → send `{ text }`            normal turn (backend captures it to the vault)
- *   → send `{ text, capture:false }`  retry of an already-saved turn
+ * The backend protocol (Phase 1/4/9):
+ *   → send `{ text, voice }`     normal turn (backend captures it to the vault)
+ *   → send `{ text, capture:false, voice }`  retry of an already-saved turn
  *   ← { type:"start" }              Eva is about to speak
  *   ← { type:"citations", citations } grounded sources for this turn (Phase 7)
  *   ← { type:"token", content }     one streamed piece
- *   ← { type:"done" }               reply complete
+ *   ← { type:"done" }               text reply complete
+ *   ← { type:"audio", seq, data }   one synthesized sentence (Phase 9, voice on)
+ *   ← { type:"audio_done" }         no more audio will arrive this turn
+ *   ← { type:"voice_unavailable" }  TTS couldn't load → fall back to text
  *   ← { type:"error", message }     graceful failure (model missing/error)
  *
  * The citations frame (when present) arrives right after `start`, before any
  * token, so the source chips can render with the bubble. A turn that retrieved
  * nothing — a vent, or a question with no match in the library — sends no such
  * frame, so no chips appear and Eva never shows a fabricated source.
+ *
+ * Phase 9 voice: when voice is on the same socket also carries `audio` frames,
+ * each a base64 WAV for one sentence, in order. They're handed to the caller's
+ * `onAudio` for sequential playback; the text stream is never blocked by them.
  */
 
 const WS_URL = "ws://127.0.0.1:8000/chat";
@@ -58,7 +65,25 @@ type ServerFrame =
   | { type: "citations"; citations: Citation[] }
   | { type: "token"; content: string }
   | { type: "done" }
+  | { type: "audio"; seq: number; format: string; text: string; data: string }
+  | { type: "audio_done" }
+  | { type: "voice_unavailable"; message?: string }
   | { type: "error"; code?: string; message?: string };
+
+/**
+ * Voice wiring passed in by the chat screen (from VoiceContext). Kept as an
+ * options object so a voice-less caller (or a test) can omit it entirely.
+ *   - `enabled`         read fresh at send-time to set the per-turn `voice` flag.
+ *   - `onAudio`         each `audio` frame's WAV payload, for sequential playback.
+ *   - `onVoiceUnavailable` TTS couldn't load; surface it and drop back to text.
+ *   - `onTurnStart`     a new turn began — stop any audio still playing.
+ */
+export type VoiceWiring = {
+  enabled: boolean;
+  onAudio: (wavBase64: string) => void;
+  onVoiceUnavailable: (message: string) => void;
+  onTurnStart: () => void;
+};
 
 export type UseChat = {
   messages: Message[];
@@ -74,7 +99,7 @@ export type UseChat = {
   dismissError: () => void;
 };
 
-export function useChat(): UseChat {
+export function useChat(voice?: VoiceWiring): UseChat {
   const [messages, setMessages] = useState<Message[]>([]);
   const [replying, setReplying] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -86,6 +111,11 @@ export function useChat(): UseChat {
   const lastUserText = useRef<string | null>(null);
   const closedByUs = useRef(false);
   const reconnectTimer = useRef<number | null>(null);
+
+  // Hold the voice wiring in a ref so the long-lived socket handlers always see
+  // the latest toggle state + callbacks without being torn down and rebuilt.
+  const voiceRef = useRef<VoiceWiring | undefined>(voice);
+  voiceRef.current = voice;
 
   const nextId = () => `m${++idSeq.current}`;
 
@@ -169,6 +199,16 @@ export function useChat(): UseChat {
         case "token":
           appendToken(frame.content);
           break;
+        case "audio":
+          // One synthesized sentence — hand it to the audio queue to play in
+          // order. The text stream is untouched, so audio lagging never holds it.
+          voiceRef.current?.onAudio(frame.data);
+          break;
+        case "audio_done":
+          break; // queue drains on its own; nothing to do on the text side
+        case "voice_unavailable":
+          voiceRef.current?.onVoiceUnavailable(frame.message || "");
+          break;
         case "done":
           finishStream(false);
           break;
@@ -219,6 +259,11 @@ export function useChat(): UseChat {
         connect();
         return;
       }
+      // A new turn supersedes the previous reply: stop any audio still playing so
+      // Eva doesn't talk over the next answer.
+      voiceRef.current?.onTurnStart();
+      const wantVoice = voiceRef.current?.enabled ?? false;
+
       const evaId = nextId();
       streamingId.current = evaId;
       setMessages((prev) => [
@@ -230,7 +275,13 @@ export function useChat(): UseChat {
       ]);
       setReplying(true);
       setError(null);
-      ws.send(JSON.stringify(capture ? { text } : { text, capture: false }));
+      ws.send(
+        JSON.stringify(
+          capture
+            ? { text, voice: wantVoice }
+            : { text, capture: false, voice: wantVoice },
+        ),
+      );
     },
     [connect],
   );

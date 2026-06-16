@@ -60,6 +60,24 @@ def chroma_dir():
     return vault_dir() / "chroma"
 
 
+def fastembed_cache_dir():
+    """Return the persistent directory the bge-small embedding model lives in.
+
+    Kept inside the vault (``<vault>/models/fastembed``), next to the whisper
+    weights, so all of Eva's local models live in one durable, user-owned place.
+
+    Why this is not left to fastembed's default: fastembed caches to the *system
+    temp dir* (``$TMPDIR/fastembed_cache``), which macOS purges periodically and
+    on reboot. When that happens the model vanishes, and because the runtime is
+    offline (``HF_HUB_OFFLINE=1`` above + the net-guard), fastembed cannot
+    re-download it — every embed then fails, surfacing to the user as a corpus
+    upload that "went wrong". Pinning the cache into the vault makes the model
+    survive temp cleanups, so a one-time download (scripts/download_embed_model.py)
+    actually stays put.
+    """
+    return vault_dir() / "models" / "fastembed"
+
+
 # bge-small-en-v1.5 is an *asymmetric* retriever: the query is meant to carry a
 # short instruction prefix while the stored passages are embedded plain. Applying
 # the prefix on the query side only pulls a genuinely relevant passage markedly
@@ -86,7 +104,11 @@ def _embed(texts: list[str]) -> list[list[float]]:
     if _embedder is None:
         from fastembed import TextEmbedding
 
-        _embedder = TextEmbedding(model_name=EMBED_MODEL)
+        # Pin the cache into the vault (not fastembed's volatile temp default) so
+        # the model is durable across reboots/temp cleanups — see fastembed_cache_dir().
+        cache = fastembed_cache_dir()
+        cache.mkdir(parents=True, exist_ok=True)
+        _embedder = TextEmbedding(model_name=EMBED_MODEL, cache_dir=str(cache))
     return [list(map(float, v)) for v in _embedder.embed(list(texts))]
 
 

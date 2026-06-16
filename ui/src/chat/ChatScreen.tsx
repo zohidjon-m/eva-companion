@@ -8,6 +8,7 @@ import {
 import { Icon } from "../components";
 import { MicButton } from "../voice/MicButton";
 import { appendTranscript } from "../voice/text";
+import { useVoice } from "../voice/VoiceContext";
 import { useChat, type Citation, type Message } from "./useChat";
 
 /**
@@ -22,8 +23,17 @@ import { useChat, type Citation, type Message } from "./useChat";
  */
 
 export function ChatScreen() {
+  // Bridge the shared voice state into the chat socket: the per-turn `voice` flag
+  // comes from the top-bar toggle, and Eva's synthesized audio is routed to the
+  // playback queue. enqueue/stop/reportUnavailable are stable callbacks.
+  const voice = useVoice();
   const { messages, replying, connected, error, send, retry, dismissError } =
-    useChat();
+    useChat({
+      enabled: voice.enabled,
+      onAudio: voice.enqueue,
+      onVoiceUnavailable: voice.reportUnavailable,
+      onTurnStart: voice.stop,
+    });
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether the view is pinned to the bottom (so streaming keeps it there).

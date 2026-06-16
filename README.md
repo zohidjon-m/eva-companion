@@ -35,6 +35,21 @@ dev.sh              starts backend + frontend together
   just don't get the native window).
 - **PyInstaller** — only needed to re-run the packaging spike.
 
+### System dependencies for the voice features
+
+- **espeak-ng** — recommended for **voice out (Kokoro TTS)**. Kokoro's misaki
+  grapheme-to-phoneme step uses it as a fallback for words outside its built-in
+  dictionary; without it, unusual words may be mispronounced. On macOS:
+
+  ```sh
+  brew install espeak-ng
+  ```
+
+- **ffmpeg is NOT required.** Voice in (faster-whisper) decodes the browser's
+  recording (webm/opus on Chrome, mp4/aac in the macOS Tauri webview) via
+  **PyAV**, which bundles its own ffmpeg libraries. You do not need a system
+  ffmpeg install.
+
 ## Run (development)
 
 ```sh
@@ -67,6 +82,43 @@ npm run dev                            # http://localhost:1420
 # or, with Rust installed, the native window:
 npm run tauri dev
 ```
+
+## First-run model & voice assets (one-time, needs internet)
+
+Eva runs **fully offline at runtime** — the backend forces the HuggingFace stack
+offline and the net-guard blocks outbound traffic. So every model weight must be
+downloaded **once** up front, with these out-of-band scripts (they deliberately
+skip the net-guard). Each writes into the vault (`local_vault/models/…`) or the
+HuggingFace cache, so the weights survive offline use:
+
+```sh
+cd backend && source .venv/bin/activate     # the scripts use the backend venv
+
+# 1. The LLM (Gemma 4 E2B GGUF) — see scripts/download_model_mac.sh
+bash ../scripts/download_model_mac.sh
+
+# 2. Embedding model (bge-small) — REQUIRED for Library upload + recall.
+#    Without it, uploading a PDF/txt/md fails with "embedding model isn't set up".
+python ../scripts/download_embed_model.py
+
+# 3. Voice in (faster-whisper STT weights). Downloads the size(s) you use.
+python ../scripts/download_whisper_model.py all        # base.en + small.en
+
+# 4. Voice out (Kokoro TTS weights + af_heart voice + spaCy en_core_web_sm).
+#    Without it, the app shows "Could not load Eva's voice (Kokoro)".
+python ../scripts/download_kokoro_model.py
+```
+
+**Python packages for voice** (in `backend/requirements.txt`, installed by
+`pip install -r requirements.txt`): `faster-whisper` (STT, pulls PyAV) and
+`kokoro` (TTS, pulls torch). If voice input returns *"Could not read that
+recording"*, confirm `faster-whisper` actually installed:
+`backend/.venv/bin/python -c "import faster_whisper, av"`.
+
+> Why these are separate scripts: fastembed defaults to caching in the **system
+> temp dir**, which macOS purges — so the embedding model is pinned into
+> `local_vault/models/fastembed` instead, and re-run script (2) if a corpus
+> upload ever starts failing after a reboot.
 
 ## Tests & checks
 

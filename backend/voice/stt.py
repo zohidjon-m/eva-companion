@@ -110,6 +110,26 @@ def is_loaded() -> bool:
     return _model is not None
 
 
+def weights_present() -> bool:
+    """Best-effort: are whisper weights already cached (so STT can load offline)?
+
+    Used by the first-run setup screen to show a live "voice ready ✓" without
+    loading CTranslate2. faster-whisper caches each size under
+    ``<vault>/models/whisper`` as a ``models--…`` snapshot; we treat any cached
+    snapshot as "present" so a user who downloaded either size sees the check.
+    A presence heuristic, not a load guarantee; never raises.
+    """
+    from pathlib import Path
+
+    try:
+        cache = Path(whisper_cache_dir())
+        if not cache.is_dir():
+            return False
+        return any(p.name.startswith("models--") for p in cache.iterdir())
+    except OSError:
+        return False
+
+
 def _build_model(size: str):
     """Construct a ``WhisperModel`` for ``size``, offline-first.
 

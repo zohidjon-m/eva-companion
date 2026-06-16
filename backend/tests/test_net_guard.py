@@ -81,3 +81,38 @@ def test_requests_is_blocked():
     assert "net guard" in str(exc_info.value).lower() or isinstance(
         exc_info.value, net_guard.OutboundBlocked
     )
+
+
+def test_blocked_attempt_is_counted_and_recorded():
+    """Phase 10: every block bumps the violation count + remembers the target,
+    so the Offline ✓ badge can turn warning-red when something tries to leave."""
+    net_guard.reset_violations()
+    assert net_guard.violations() == 0
+    assert net_guard.allow_summary()["last_blocked"] is None
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.2)
+    with pytest.raises(net_guard.OutboundBlocked):
+        s.connect(("1.1.1.1", 443))
+    s.close()
+
+    assert net_guard.violations() == 1
+    summary = net_guard.allow_summary()
+    assert summary["violations"] == 1
+    assert summary["last_blocked"] == "1.1.1.1"
+
+
+def test_loopback_does_not_count_as_a_violation():
+    """An allowed (loopback) attempt must never register as a blocked call."""
+    net_guard.reset_violations()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.2)
+    try:
+        s.connect(("127.0.0.1", 9))
+    except net_guard.OutboundBlocked:
+        pytest.fail("loopback wrongly blocked")
+    except OSError:
+        pass
+    finally:
+        s.close()
+    assert net_guard.violations() == 0

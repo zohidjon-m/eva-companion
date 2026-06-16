@@ -25,6 +25,42 @@ def store(tmp_path, monkeypatch):
 def test_defaults_when_no_file(store):
     s = store.load()
     assert s["whisper_model_size"] == "base.en"
+    # Phase 10 voice knobs default to off / natural pace.
+    assert s["voice_enabled"] is False
+    assert s["voice_speed"] == 1.0
+
+
+def test_voice_enabled_round_trip(store):
+    assert store.update({"voice_enabled": True})["voice_enabled"] is True
+    assert store.get("voice_enabled") is True
+
+
+def test_voice_speed_round_trip_and_range(store):
+    assert store.update({"voice_speed": 1.15})["voice_speed"] == 1.15
+    # Out of range (too fast / too slow) is rejected.
+    with pytest.raises(ValueError):
+        store.update({"voice_speed": 2.0})
+    with pytest.raises(ValueError):
+        store.update({"voice_speed": 0.1})
+    # A non-number is rejected too (and a bool is not a valid speed).
+    with pytest.raises(ValueError):
+        store.update({"voice_speed": "fast"})
+    with pytest.raises(ValueError):
+        store.update({"voice_speed": True})
+
+
+def test_out_of_range_stored_speed_falls_back_to_default(store):
+    path = store._settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"voice_speed": 9.0}))
+    assert store.load()["voice_speed"] == 1.0
+
+
+def test_ranges_lists_voice_speed_bounds(store):
+    r = store.ranges()["voice_speed"]
+    assert r["min"] == store.VOICE_SPEED_MIN
+    assert r["max"] == store.VOICE_SPEED_MAX
+    assert r["step"] == store.VOICE_SPEED_STEP
 
 
 def test_update_round_trip_persists(store):
@@ -75,6 +111,28 @@ def test_get_settings_endpoint(store):
     body = r.json()
     assert body["settings"]["whisper_model_size"] == "base.en"
     assert body["options"]["whisper_model_size"] == ["base.en", "small.en"]
+    # Phase 10: the screen also gets numeric ranges + the vault path to display.
+    assert body["ranges"]["voice_speed"]["min"] == store.VOICE_SPEED_MIN
+    assert body["vault_path"].endswith("local_vault")
+
+
+def test_patch_settings_endpoint_updates_voice(store):
+    from app import app
+
+    client = TestClient(app)
+    r = client.patch("/settings", json={"voice_enabled": True, "voice_speed": 1.1})
+    assert r.status_code == 200
+    body = r.json()["settings"]
+    assert body["voice_enabled"] is True
+    assert body["voice_speed"] == 1.1
+
+
+def test_patch_settings_endpoint_rejects_out_of_range_speed(store):
+    from app import app
+
+    client = TestClient(app)
+    r = client.patch("/settings", json={"voice_speed": 5.0})
+    assert r.status_code == 400
 
 
 def test_patch_settings_endpoint_updates(store):

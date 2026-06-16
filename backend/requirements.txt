@@ -35,6 +35,14 @@ llama-cpp-python[server]>=0.3.2
 # call) or out-of-band via scripts/download_whisper_model.py.
 faster-whisper>=1.0,<2
 
+# Phase 9 — voice out (Kokoro TTS). Kokoro synthesizes Eva's replies to 24 kHz
+# speech locally; it pulls torch. Like the model server, it need not live in the
+# backend's own venv — the import happens in-process (voice/tts.py), lazy-loaded
+# on the first voiced turn, never at startup (§4 memory budget). The sentence
+# queue (voice/sentence_queue.py) splits the reply at §7.5 boundaries and is
+# pure-Python. Voice weights download once on first use (the only TTS net call).
+kokoro>=0.9,<1
+
 # Test/dev only (Phase 0 socket-guard test uses requests to match the plan).
 # httpx is also the runtime client used by backend/llm/client.py to stream.
 requests==2.32.3

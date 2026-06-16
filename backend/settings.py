@@ -37,16 +37,36 @@ log = logging.getLogger("eva.settings")
 # accent (plan Phase 8). English-only models only, matching CLAUDE.md.
 WHISPER_SIZES = ("base.en", "small.en")
 
+# Kokoro speech-rate bounds (Phase 10 voice-out knob). 1.0 is Kokoro's natural
+# pace; below ~0.7 it drags and above ~1.3 it clips, so we keep the slider inside
+# a range that always sounds like Eva. voice/tts.py reads the value each synth.
+VOICE_SPEED_MIN = 0.7
+VOICE_SPEED_MAX = 1.3
+VOICE_SPEED_STEP = 0.05
+
 # The complete set of settings keys, with their defaults. Adding a Phase-10
-# setting means adding it here (and, if it has a closed value set, to ALLOWED).
+# setting means adding it here (and, if it has a closed value set, to ALLOWED, or
+# a numeric range, to RANGES).
 DEFAULTS: dict[str, object] = {
     "whisper_model_size": "base.en",
+    # Whether Eva speaks her replies (the top-bar voice toggle, persisted so the
+    # choice survives a restart). Off by default — voice is opt-in and the heavy
+    # Kokoro load never happens until the user turns it on (8 GB budget, §4).
+    "voice_enabled": False,
+    # Eva's speaking rate (Kokoro ``speed``). 1.0 = natural pace.
+    "voice_speed": 1.0,
 }
 
 # Keys whose value must be one of a fixed set. Checked on every write so readers
 # (e.g. voice/stt.py) never have to defend against a bad value from disk.
 ALLOWED: dict[str, tuple[str, ...]] = {
     "whisper_model_size": WHISPER_SIZES,
+}
+
+# Keys whose value must be a number within an inclusive ``(min, max)`` range.
+# Validated on write alongside ALLOWED so readers can trust the stored value.
+RANGES: dict[str, tuple[float, float]] = {
+    "voice_speed": (VOICE_SPEED_MIN, VOICE_SPEED_MAX),
 }
 
 # Writes are serialized so two concurrent PATCHes can't interleave a read and a
@@ -81,8 +101,9 @@ def load() -> dict:
             if key in stored:
                 value = stored[key]
                 # Drop a stored value that is no longer valid (e.g. a removed
-                # whisper size), falling back to the default rather than trusting it.
-                if key in ALLOWED and value not in ALLOWED[key]:
+                # whisper size, or a speed nudged out of range by a hand-edit),
+                # falling back to the default rather than trusting it.
+                if not _is_valid(key, value):
                     log.warning(
                         "settings: ignoring invalid stored %s=%r; using default %r",
                         key, value, DEFAULTS[key],
@@ -90,6 +111,25 @@ def load() -> dict:
                     continue
                 data[key] = value
     return data
+
+
+def _is_valid(key: str, value: object) -> bool:
+    """Return whether ``value`` is acceptable for ``key`` (closed set or range).
+
+    The single validity rule shared by :func:`load` (which silently drops a bad
+    stored value) and :func:`update` (which rejects a bad incoming one), so the
+    two can never disagree about what counts as valid.
+    """
+    if key in ALLOWED:
+        return value in ALLOWED[key]
+    if key in RANGES:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        lo, hi = RANGES[key]
+        return lo <= float(value) <= hi
+    if isinstance(DEFAULTS.get(key), bool):
+        return isinstance(value, bool)
+    return True
 
 
 def get(key: str):
@@ -111,11 +151,19 @@ def update(patch: dict) -> dict:
         for key, value in patch.items():
             if key not in DEFAULTS:
                 raise ValueError(f"unknown setting {key!r}")
-            if key in ALLOWED and value not in ALLOWED[key]:
-                raise ValueError(
-                    f"invalid value {value!r} for {key!r}; "
-                    f"allowed: {', '.join(ALLOWED[key])}"
-                )
+            if not _is_valid(key, value):
+                if key in ALLOWED:
+                    raise ValueError(
+                        f"invalid value {value!r} for {key!r}; "
+                        f"allowed: {', '.join(ALLOWED[key])}"
+                    )
+                if key in RANGES:
+                    lo, hi = RANGES[key]
+                    raise ValueError(
+                        f"invalid value {value!r} for {key!r}; "
+                        f"must be a number between {lo} and {hi}"
+                    )
+                raise ValueError(f"invalid value {value!r} for {key!r}")
             data[key] = value
         path = _settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,3 +180,18 @@ def options() -> dict:
     the list.
     """
     return {key: list(values) for key, values in ALLOWED.items()}
+
+
+def ranges() -> dict:
+    """Return the ``{min, max, step}`` bounds for numeric settings, for the UI.
+
+    The voice-speed slider reads its bounds from here, so the backend stays the
+    single source of truth for the allowed range — the UI never hard-codes it.
+    """
+    return {
+        "voice_speed": {
+            "min": VOICE_SPEED_MIN,
+            "max": VOICE_SPEED_MAX,
+            "step": VOICE_SPEED_STEP,
+        },
+    }
