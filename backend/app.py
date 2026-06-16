@@ -252,6 +252,9 @@ async def chat_ws(ws: WebSocket) -> None:
       3. Classify intent (vent/question/advice_request). Only question and
          advice_request pull corpus passages; vent bypasses retrieval entirely so
          Eva literally has nothing to advise from (EVA_MEMORY_ARCHITECTURE §5.9).
+         (Phase 11) Independently, recall the nearest past journal summaries above
+         a relevance threshold (recency-weighted) into the memory slot — on every
+         turn, since remembering the user's own entries is listening, not advice.
       4. Assemble the system prompt from the four template slots
          (:mod:`prompts.assembly`), appending the crisis addendum on a match and
          the retrieved passages (with the grounding rule) in the corpus slot.
@@ -329,9 +332,28 @@ async def chat_ws(ws: WebSocket) -> None:
                     intent.label, intent.method,
                 )
 
+            # 3b. (Phase 11) Memory recall — "Eva remembers". Runs on EVERY turn,
+            #     independent of the listen-first gate above: recalling the user's
+            #     OWN past entries is part of listening, not advice (the gate only
+            #     governs the library/corpus). Code does the remembering and the
+            #     relevance gate (recall_memories); the model is only handed the
+            #     relevant summaries. The threshold means an unrelated message
+            #     surfaces nothing, so Eva never fabricates a memory or a chip.
+            #     The current turn was captured above, but its embedding runs in the
+            #     background (slow extraction first), so it cannot recall itself.
+            memories = retrieval.recall_memories(text)
+            memory_context = retrieval.format_memory_context(memories)
+            if memories:
+                log.info(
+                    "recall fired → %d past entr(y/ies) in context (%s)",
+                    len(memories), ", ".join(m.date for m in memories),
+                )
+
             # 4. Assemble the system prompt with whatever slots are populated.
             system_prompt = assembly.build_chat_system_prompt(
-                persona_addendum=addendum, corpus_context=corpus_context
+                persona_addendum=addendum,
+                memory_context=memory_context,
+                corpus_context=corpus_context,
             )
             messages = _compose_messages(system_prompt, history, text)
 
@@ -341,6 +363,13 @@ async def chat_ws(ws: WebSocket) -> None:
             #    a "not in your library" answer therefore carries no chips at all.
             if citations:
                 await emit({"type": "citations", "citations": citations})
+            # 5b. (Phase 11) Surface which past days Eva is remembering, so the demo
+            #     audience SEES recall happen as a subtle chip. Only sent when real
+            #     memories cleared the threshold — no memory, no chip, ever.
+            if memories:
+                await emit(
+                    {"type": "memory", "memories": [m.as_chip() for m in memories]}
+                )
 
             # 6. (Phase 9) When this turn asked for voice, spin up a VoiceStream: it
             #    feeds each token into the §7.5 sentence splitter and synthesizes

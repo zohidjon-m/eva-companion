@@ -52,6 +52,11 @@ def _setup(monkeypatch, recorder, *, passages):
         return passages
 
     monkeypatch.setattr(retrieval, "retrieve_corpus", spy_retrieve)
+    # Phase 11 memory recall runs on every turn but is independent of the corpus
+    # gate under test here; stub it off so these tests see only the corpus path
+    # (no memory frame, no memory block in the prompt). Recall is covered in
+    # test_retrieval.py.
+    monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [])
 
 
 def _drain(ws):
@@ -129,3 +134,69 @@ def test_question_with_no_match_cites_nothing(monkeypatch):
     assert rec["retrieve_calls"] == ["What does the book say about quantum computing?"]
     assert citations is None
     assert "Passages from their library" not in rec["messages"][0]["content"]
+
+
+# ── Phase 11: memory recall wiring at the socket boundary ────────────────────
+
+
+def _drain_with_memory(ws):
+    """Read one reply; return (text, citations_frame_or_None, memory_frame_or_None)."""
+    assert ws.receive_json() == {"type": "start"}
+    citations = memories = None
+    out = []
+    while True:
+        frame = ws.receive_json()
+        if frame["type"] == "done":
+            break
+        if frame["type"] == "citations":
+            citations = frame["citations"]
+            continue
+        if frame["type"] == "memory":
+            memories = frame["memories"]
+            continue
+        assert frame["type"] == "token"
+        out.append(frame["content"])
+    return "".join(out), citations, memories
+
+
+def test_recall_injects_memory_block_and_emits_chip(monkeypatch):
+    # A vent turn (no corpus retrieval) that nonetheless recalls a past entry:
+    # recall is NOT gated by the listen-first intent rule, so Eva can remember even
+    # while listening. The recalled summary lands in the prompt and a memory frame
+    # carries the date chip to the UI.
+    rec: dict = {}
+    _setup(monkeypatch, rec, passages=[])  # vent → corpus stays empty
+    memory = retrieval.Memory(
+        entry_id="e1", date="2026-06-03",
+        summary="You wrote about the strain of moving apartments.",
+        mood=-1, themes=["home"], distance=0.25,
+    )
+    monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [memory])
+
+    client = TestClient(app)
+    with client.websocket_connect("/chat") as ws:
+        ws.send_text("I've been so drained lately.")
+        _, citations, memories = _drain_with_memory(ws)
+
+    # No corpus citation (vent), but the recalled memory surfaced as a chip…
+    assert citations is None
+    assert memories == [{"date": "2026-06-03", "label": "Jun 3"}]
+    # …and the summary was injected under the memory-context header in the prompt.
+    prompt = rec["messages"][0]["content"]
+    assert "Context from past journal entries" in prompt
+    assert "the strain of moving apartments" in prompt
+
+
+def test_no_recall_means_no_memory_frame_or_block(monkeypatch):
+    # The honesty path: recall returns nothing → no memory frame and no memory
+    # block in the prompt, so Eva has no past entry to (mis)reference.
+    rec: dict = {}
+    _setup(monkeypatch, rec, passages=[])  # _setup already stubs recall → []
+    client = TestClient(app)
+    with client.websocket_connect("/chat") as ws:
+        ws.send_text("Just a brand new thought I've never written down.")
+        _, citations, memories = _drain_with_memory(ws)
+
+    assert citations is None
+    assert memories is None
+    assert "Context from past journal entries" not in rec["messages"][0]["content"]
