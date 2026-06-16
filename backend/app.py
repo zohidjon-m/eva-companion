@@ -43,6 +43,11 @@ from net_guard import allow_summary, install_net_guard, is_installed
 # the journal browse / read-only day view.
 from memory import capture, db, vault, vault_dir
 
+# Phase 13 L3 profile (the seam): what Eva understands about the user. Read into
+# the {profile_slices} chat slot every turn; the Profile screen reads/edits it via
+# GET/PUT /profile (profile.md ↔ profile.json sync). # DEMO-STUB until the L3 engine.
+from memory import profile
+
 # Phase 7 RAG: the intent gate (listen-first — only question/advice_request pull
 # the corpus) and corpus retrieval (relevant, cited passages or nothing).
 from intent import classifier as intent_classifier
@@ -350,10 +355,25 @@ async def chat_ws(ws: WebSocket) -> None:
                     len(memories), ", ".join(m.date for m in memories),
                 )
 
+            # 3c. (Phase 13) Profile slices — what Eva understands about the user.
+            #     Read on EVERY turn through the L3 seam (memory.profile): the core
+            #     (who they are, their goals, their baseline) is always included so
+            #     a reply can reference a stated goal unprompted, and topic-relevant
+            #     patterns/loops are folded in when the message touches them. Returns
+            #     "" when there is no profile (deleted profile.json → no slot, no
+            #     crash), so this is a one-line fill of an already-present slot.
+            profile_slices = profile.slices_for_prompt(text)
+            if profile_slices:
+                log.info(
+                    "profile → %d slice(s) in context",
+                    profile_slices.count("\n") + 1,
+                )
+
             # 4. Assemble the system prompt with whatever slots are populated.
             system_prompt = assembly.build_chat_system_prompt(
                 persona_addendum=addendum,
                 memory_context=memory_context,
+                profile_slices=profile_slices,
                 corpus_context=corpus_context,
             )
             messages = _compose_messages(system_prompt, history, text)
@@ -611,6 +631,51 @@ async def acknowledge_journal(body: AcknowledgeIn) -> dict:
     if text is None:
         raise HTTPException(status_code=404, detail="entry not found")
     return {"acknowledgment": await _journal_acknowledgment(text)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 13 — Profile. The user can read and correct what Eva understands about
+# them. GET returns the human-readable profile.md rendering (the structured truth
+# lives in profile.json); PUT saves an edited rendering, running the lenient
+# profile.md → profile.json sync (§7.2) that turns edits into user-anchored
+# corrections. Both go through the L3 seam (memory.profile); the real engine will
+# write profile.json without changing these endpoints. # DEMO-STUB.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/profile")
+def get_profile_md() -> dict:
+    """Return the profile for the Profile screen to render, or an absent state.
+
+    ``present`` is ``False`` (with ``markdown: null``) when there is no profile —
+    a fresh vault, or a deleted ``profile.json`` — so the screen shows its
+    "Eva is still getting to know you" empty state instead of erroring.
+    """
+    markdown = profile.read_markdown()
+    return {"present": markdown is not None, "markdown": markdown}
+
+
+class ProfilePut(BaseModel):
+    """Request body for ``PUT /profile`` — the edited ``profile.md`` text."""
+
+    markdown: str = Field(..., description="The full edited profile.md text.")
+
+
+@app.put("/profile")
+def put_profile_md(body: ProfilePut) -> dict:
+    """Save an edited ``profile.md`` and return the re-rendered profile + warnings.
+
+    Runs the §7.2 sync: the edited Markdown is parsed against the current profile,
+    each understood change is applied (text edits to existing claims become
+    user-anchored corrections), and both ``profile.json`` and ``profile.md`` are
+    rewritten. ``warnings`` lists any section that couldn't be applied (it was left
+    unchanged) so the UI can tell the user. 404 when there is no profile to edit.
+    """
+    try:
+        markdown, warnings = profile.save_markdown(body.markdown)
+    except profile.NoProfileError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"present": True, "markdown": markdown, "warnings": warnings}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
