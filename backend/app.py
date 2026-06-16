@@ -42,6 +42,11 @@ from net_guard import allow_summary, install_net_guard, is_installed
 # the journal browse / read-only day view.
 from memory import capture, db, vault
 
+# Phase 7 RAG: the intent gate (listen-first — only question/advice_request pull
+# the corpus) and corpus retrieval (relevant, cited passages or nothing).
+from intent import classifier as intent_classifier
+from memory import retrieval
+
 # Phase 1 LLM runtime: the model-server supervisor and the async client.
 from llm import client as llm_client
 from llm import server as llm_server
@@ -221,13 +226,19 @@ async def chat_ws(ws: WebSocket) -> None:
       ← ``{"type":"done"}`` when the reply completes
       ← ``{"type":"error","code":…,"message":…}`` on any failure
 
-    Phase 4 wraps the Phase-1 stream with the real chat surface:
+    Phase 4 wraps the Phase-1 stream with the real chat surface; Phase 7 adds the
+    listen-first RAG gate to it:
       1. Capture the user's turn (vault + L1) before anything else.
       2. Run the interim keyword crisis-care scan over the user's text.
-      3. Assemble the system prompt from the four template slots
-         (:mod:`prompts.assembly`), appending the crisis addendum on a match.
-      4. Stream the reply, capped at 450 tokens, with this session's history for
-         multi-turn coherence.
+      3. Classify intent (vent/question/advice_request). Only question and
+         advice_request pull corpus passages; vent bypasses retrieval entirely so
+         Eva literally has nothing to advise from (EVA_MEMORY_ARCHITECTURE §5.9).
+      4. Assemble the system prompt from the four template slots
+         (:mod:`prompts.assembly`), appending the crisis addendum on a match and
+         the retrieved passages (with the grounding rule) in the corpus slot.
+      5. If passages were retrieved, send a ``citations`` frame so the UI can show
+         source chips; then stream the reply, capped at 450 tokens, with this
+         session's history for multi-turn coherence.
 
     The model server going down (even mid-reply) or still loading is surfaced as a
     graceful error frame, never an unhandled crash. ``history`` is per-connection:
@@ -261,12 +272,41 @@ async def chat_ws(ws: WebSocket) -> None:
                 )
                 continue
 
-            # 2–3. Interim crisis-care scan, then assemble the system prompt.
+            # 2. Interim crisis-care scan.
             addendum = crisis_check.crisis_addendum() if crisis_check.is_crisis(text) else ""
-            system_prompt = assembly.build_chat_system_prompt(persona_addendum=addendum)
+
+            # 3. Listen-first intent gate, then retrieval ONLY on a retrieving
+            #    intent. A vent turn never queries the corpus — the discipline is
+            #    structural (§5.9), not a prompt plea — and is logged either way so
+            #    the bypass is visible in the demo logs.
+            intent = await intent_classifier.classify(text)
+            corpus_context, citations = "", []
+            if intent.retrieves:
+                passages = retrieval.retrieve_corpus(text)
+                corpus_context = retrieval.format_corpus_context(passages)
+                citations = [p.as_citation() for p in passages]
+                log.info(
+                    "intent=%s (%s) → retrieval fired, %d passage(s) cited",
+                    intent.label, intent.method, len(citations),
+                )
+            else:
+                log.info(
+                    "intent=%s (%s) → retrieval BYPASSED (listen-first)",
+                    intent.label, intent.method,
+                )
+
+            # 4. Assemble the system prompt with whatever slots are populated.
+            system_prompt = assembly.build_chat_system_prompt(
+                persona_addendum=addendum, corpus_context=corpus_context
+            )
             messages = _compose_messages(system_prompt, history, text)
 
             await ws.send_json({"type": "start"})
+            # 5. Surface citations (if any) before the tokens, so the chips can
+            #    render alongside the bubble. No frame when nothing was retrieved —
+            #    a "not in your library" answer therefore carries no chips at all.
+            if citations:
+                await ws.send_json({"type": "citations", "citations": citations})
             reply_parts: list[str] = []
             try:
                 async for piece in llm_client.stream_chat(

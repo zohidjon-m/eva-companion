@@ -64,13 +64,28 @@ def build_journal_ack_prompt() -> str:
     """
     return f"{load_persona()}\n\n{JOURNAL_ACK_INSTRUCTION}"
 
+# The hard grounding rule that governs the corpus slot (Phase 7; EVA_MEMORY_
+# ARCHITECTURE §5.10, EVA_SYSTEM_DESIGN §7.3). It lives here, beside the slot, and
+# is emitted automatically whenever corpus passages are present — so the
+# no-invented-citations discipline can never be forgotten at a call site. A
+# misquoted or misattributed source is a real harm, not a glitch, hence the
+# emphatic wording; the passages were already gated by relevance upstream, so if
+# this block is present at all, on-topic passages exist for Eva to answer from.
+GROUNDING_RULE = (
+    "Answer using ONLY the passages below. If they do not contain what the person "
+    "is asking about, say plainly that you don't find it in their library — do not "
+    "answer from your own knowledge, and never invent, guess, or paraphrase a "
+    "quote, source, title, page, or citation. When you do draw on a passage, name "
+    "its source as shown."
+)
+
 # The three *context* slots, in the order they are appended after the persona.
 # Each entry is (slot_name, header_shown_to_the_model). The persona block is
 # handled separately because it is the prompt's spine, not a context section.
 _CONTEXT_SLOTS: tuple[tuple[str, str], ...] = (
     ("memory_context", "Context from past journal entries (reference only if relevant):"),
     ("profile_slices", "What you know about this person (from their profile):"),
-    ("corpus_context", "Passages from their library (quote only from these, and name the source):"),
+    ("corpus_context", f"Passages from their library. {GROUNDING_RULE}"),
 )
 
 

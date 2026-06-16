@@ -13,16 +13,33 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * The backend protocol (Phase 1/4):
  *   → send `{ text }`            normal turn (backend captures it to the vault)
  *   → send `{ text, capture:false }`  retry of an already-saved turn
- *   ← { type:"start" }           Eva is about to speak
- *   ← { type:"token", content }  one streamed piece
- *   ← { type:"done" }            reply complete
- *   ← { type:"error", message }  graceful failure (model missing/error)
+ *   ← { type:"start" }              Eva is about to speak
+ *   ← { type:"citations", citations } grounded sources for this turn (Phase 7)
+ *   ← { type:"token", content }     one streamed piece
+ *   ← { type:"done" }               reply complete
+ *   ← { type:"error", message }     graceful failure (model missing/error)
+ *
+ * The citations frame (when present) arrives right after `start`, before any
+ * token, so the source chips can render with the bubble. A turn that retrieved
+ * nothing — a vent, or a question with no match in the library — sends no such
+ * frame, so no chips appear and Eva never shows a fabricated source.
  */
 
 const WS_URL = "ws://127.0.0.1:8000/chat";
 const RECONNECT_MS = 1500;
 
 export type ChatRole = "user" | "eva";
+
+/** One grounded source behind an Eva reply (Phase 7 RAG). */
+export type Citation = {
+  source_file: string;
+  page: number | null;
+  section: string | null;
+  /** Short display label, e.g. "book.pdf · p. 42". */
+  label: string;
+  /** The exact passage Eva was grounded in (shown when a chip is opened). */
+  text: string;
+};
 
 export type Message = {
   id: string;
@@ -32,10 +49,13 @@ export type Message = {
   streaming?: boolean;
   /** This turn failed (model error or the socket dropped mid-reply). */
   failed?: boolean;
+  /** Grounded sources for this Eva turn (absent when nothing was retrieved). */
+  citations?: Citation[];
 };
 
 type ServerFrame =
   | { type: "start" }
+  | { type: "citations"; citations: Citation[] }
   | { type: "token"; content: string }
   | { type: "done" }
   | { type: "error"; code?: string; message?: string };
@@ -75,6 +95,16 @@ export function useChat(): UseChat {
     setMessages((prev) =>
       prev.map((m) =>
         m.id === streamingId.current ? { ...m, text: m.text + content } : m,
+      ),
+    );
+  };
+
+  // Attach the turn's grounded sources to the live Eva bubble (arrives before
+  // the first token). Targets the streaming bubble by id, like appendToken.
+  const attachCitations = (citations: Citation[]) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === streamingId.current ? { ...m, citations } : m,
       ),
     );
   };
@@ -133,6 +163,9 @@ export function useChat(): UseChat {
       switch (frame.type) {
         case "start":
           break; // placeholder bubble already shows the typing indicator
+        case "citations":
+          attachCitations(frame.citations);
+          break;
         case "token":
           appendToken(frame.content);
           break;

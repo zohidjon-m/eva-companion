@@ -6,7 +6,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { Icon } from "../components";
-import { useChat, type Message } from "./useChat";
+import { useChat, type Citation, type Message } from "./useChat";
 
 /**
  * ChatScreen — the Phase 4 chat surface, wired to `WS /chat` via useChat.
@@ -89,30 +89,74 @@ function ChatGreeting() {
 
 /** One message row — Eva left, user right. Eva shows typing dots until tokens land. */
 function Bubble({ message }: { message: Message }) {
-  const { role, text, streaming, failed } = message;
+  const { role, text, streaming, failed, citations } = message;
   const isEva = role === "eva";
   const waiting = isEva && streaming && text === "";
 
   return (
     <div className={`msg msg--${role}`}>
-      <div
-        className={[
-          "bubble",
-          `bubble--${role}`,
-          failed ? "bubble--failed" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-      >
-        {waiting ? (
-          <TypingDots />
-        ) : (
-          <>
-            {text}
-            {isEva && streaming && <span className="bubble__cursor" />}
-          </>
+      <div className="msg__content">
+        <div
+          className={[
+            "bubble",
+            `bubble--${role}`,
+            failed ? "bubble--failed" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
+          {waiting ? (
+            <TypingDots />
+          ) : (
+            <>
+              {text}
+              {isEva && streaming && <span className="bubble__cursor" />}
+            </>
+          )}
+        </div>
+        {isEva && citations && citations.length > 0 && (
+          <Citations citations={citations} />
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Source chips under an Eva reply — the visible proof that the answer was
+ * grounded in the user's own library. Each chip names a source (file + page or
+ * section); clicking one opens the exact passage Eva was given, so the user can
+ * check the citation themselves. Chips only ever render from citations the
+ * backend sent, so Eva can never show a source she didn't actually retrieve.
+ */
+function Citations({ citations }: { citations: Citation[] }) {
+  const [openIndex, setOpenIndex] = useState<number | null>(null);
+
+  return (
+    <div className="citations">
+      <span className="citations__label">
+        <Icon name="library" size={13} />
+        From your library
+      </span>
+      <div className="citations__chips">
+        {citations.map((c, i) => (
+          <button
+            key={i}
+            type="button"
+            className={`cite-chip${openIndex === i ? " cite-chip--open" : ""}`}
+            onClick={() => setOpenIndex(openIndex === i ? null : i)}
+            aria-expanded={openIndex === i}
+            title="Show the passage"
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+      {openIndex !== null && (
+        <blockquote className="citations__passage">
+          {citations[openIndex].text}
+        </blockquote>
+      )}
     </div>
   );
 }

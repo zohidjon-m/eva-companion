@@ -60,8 +60,22 @@ def chroma_dir():
     return vault_dir() / "chroma"
 
 
+# bge-small-en-v1.5 is an *asymmetric* retriever: the query is meant to carry a
+# short instruction prefix while the stored passages are embedded plain. Applying
+# the prefix on the query side only pulls a genuinely relevant passage markedly
+# closer than an off-topic one, which is what lets a distance threshold actually
+# separate "in the library" from "not in the library". The string below is the
+# model's documented query instruction — do NOT change it without re-embedding,
+# and NEVER apply it to stored chunks/summaries (that would break the asymmetry).
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+
 def _embed(texts: list[str]) -> list[list[float]]:
     """Embed text with fastembed's bge-small-en-v1.5 (local, deterministic).
+
+    This is the PASSAGE side of the asymmetric pair: stored chunks (corpus) and
+    stored summaries (journals) are embedded plain, with no prefix. Search queries
+    go through :func:`_embed_query` instead.
 
     We compute embeddings ourselves and hand Chroma explicit vectors rather than
     attaching a Chroma embedding function. That pins the exact model the plan
@@ -74,6 +88,18 @@ def _embed(texts: list[str]) -> list[list[float]]:
 
         _embedder = TextEmbedding(model_name=EMBED_MODEL)
     return [list(map(float, v)) for v in _embedder.embed(list(texts))]
+
+
+def _embed_query(query_text: str) -> list[list[float]]:
+    """Embed a SEARCH QUERY with the bge-small instruction prefix (asymmetric side).
+
+    The one place the query prefix is applied, so every retrieval path shares one
+    definition: corpus retrieval (:func:`query_corpus`) uses it now, and Phase 11's
+    journal recall (:func:`recall`) uses it too — both query against indexes that
+    were built with the plain (prefix-free) passage embeddings, so the prefix must
+    live here, on the query, and nowhere on the stored side.
+    """
+    return _embed([f"{QUERY_PREFIX}{query_text}"])
 
 
 def _get_client():
@@ -190,7 +216,7 @@ def recall(query_text: str, n_results: int = 5, *, include_seeded: bool = False)
     """
     where = None if include_seeded else {"is_seeded": False}
     return _get_collection().query(
-        query_embeddings=_embed([query_text]), n_results=n_results, where=where
+        query_embeddings=_embed_query(query_text), n_results=n_results, where=where
     )
 
 
@@ -263,7 +289,7 @@ def query_corpus(query_text: str, n_results: int = 5) -> dict:
     the chunk it came from.
     """
     return _get_corpus_collection().query(
-        query_embeddings=_embed([query_text]), n_results=n_results
+        query_embeddings=_embed_query(query_text), n_results=n_results
     )
 
 
