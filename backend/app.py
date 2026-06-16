@@ -43,6 +43,12 @@ from net_guard import allow_summary, install_net_guard, is_installed
 # the journal browse / read-only day view.
 from memory import capture, db, vault, vault_dir
 
+# Phase 14 L4 insights (the seams): the seeded knowledge graph and the descriptive
+# growth report behind GET /insights/graph and GET /insights/growth. Both read the
+# same extracted data the mood chart uses. # DEMO-STUB until the real L4 builder.
+from memory import graph as graph_l4
+from memory import growth as growth_l4
+
 # Phase 13 L3 profile (the seam): what Eva understands about the user. Read into
 # the {profile_slices} chat slot every turn; the Profile screen reads/edits it via
 # GET/PUT /profile (profile.md ↔ profile.json sync). # DEMO-STUB until the L3 engine.
@@ -747,6 +753,83 @@ def insights_mood(
         for r in rows
     ]
     return {"from": date_from, "to": date_to, "include_seeded": include_seeded, "points": points}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 14 — Insights: the knowledge graph and the growth report (L4 seams).
+#
+# Both are pure reads over the data Eva already extracted — no model is touched,
+# which keeps the graph deterministic and the growth report descriptive (§12: the
+# growth analytics must never read as a verdict; code computes, nothing judges).
+# The seeded demo data (scripts/seed_demo.py) is is_seeded=1, so both endpoints
+# default to live-only and lift that with ?include_seeded=true — the same demo
+# toggle the mood chart uses.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/insights/graph")
+def insights_graph(
+    include_seeded: bool = Query(False, description="Include is_seeded=1 demo rows (the demo graph)."),
+) -> dict:
+    """Return the knowledge graph as the EVA_MEMORY_ARCHITECTURE §7.4 payload.
+
+    ``{"nodes": [...], "edges": [...]}`` — each node typed (theme/person/place/
+    goal/problem/emotion) with its evidence ``entries``; each edge typed
+    (co_occurrence/temporal/similarity/hypothesis) with a ``weight`` and, for
+    hypothesis edges, ``is_hypothesis: true`` plus a human-readable ``label`` the
+    UI renders dashed with a confirm/dismiss affordance. Live-only by default; a
+    fresh vault returns empty lists. No model is involved — this is a DB read.
+    """
+    conn = db.get_or_create_db()
+    try:
+        return graph_l4.read_graph(conn, include_seeded=include_seeded)
+    finally:
+        conn.close()
+
+
+@app.get("/insights/growth")
+def insights_growth(
+    a_from: str | None = Query(None, description="Earlier period start, YYYY-MM-DD."),
+    a_to: str | None = Query(None, description="Earlier period end, YYYY-MM-DD."),
+    b_from: str | None = Query(None, description="Recent period start, YYYY-MM-DD."),
+    b_to: str | None = Query(None, description="Recent period end, YYYY-MM-DD."),
+    include_seeded: bool = Query(False, description="Include is_seeded=1 demo rows (the demo report)."),
+) -> dict:
+    """Return a DESCRIPTIVE period-vs-period growth report (§11 growth shape).
+
+    Compares an earlier window A to a more-recent window B: entry counts, the
+    average mood you noted, the themes in each, a neutral mood delta, and a
+    reflective closing question. It describes what you wrote — never a verdict
+    (§12). Pass all four dates for an explicit comparison; omit them (the demo
+    path) to auto-split the available history at its midpoint. The doc's ``?a=&b=``
+    is indicative — these named bounds are the concrete contract. A fresh vault
+    returns ``{"empty": true}`` so the screen can show an empty state.
+    """
+    explicit = [a_from, a_to, b_from, b_to]
+    for label, value in (("a_from", a_from), ("a_to", a_to), ("b_from", b_from), ("b_to", b_to)):
+        if value is not None and not _DATE_RE.match(value):
+            raise HTTPException(status_code=400, detail=f"'{label}' must be YYYY-MM-DD")
+
+    conn = db.get_or_create_db()
+    try:
+        if all(v is not None for v in explicit):
+            report = growth_l4.compare_periods(
+                conn, a_from=a_from, a_to=a_to, b_from=b_from, b_to=b_to,
+                include_seeded=include_seeded,
+            )
+        elif any(v is not None for v in explicit):
+            raise HTTPException(
+                status_code=400,
+                detail="Pass all of a_from, a_to, b_from, b_to — or none (to auto-split).",
+            )
+        else:
+            report = growth_l4.auto_compare(conn, include_seeded=include_seeded)
+    finally:
+        conn.close()
+
+    if report is None:
+        return {"empty": True, "include_seeded": include_seeded}
+    return {**report, "empty": False, "include_seeded": include_seeded}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

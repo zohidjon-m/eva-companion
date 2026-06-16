@@ -2,7 +2,7 @@
 -- Increment PRAGMA user_version on every schema change; add a migration block in db.py.
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
--- PRAGMA user_version = 1;
+-- PRAGMA user_version = 2;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- L0 index (truth lives in Markdown files; this table is the queryable index)
@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS graph_nodes (
     label       TEXT NOT NULL,
     type        TEXT NOT NULL CHECK(type IN ('theme','person','place','goal','problem','emotion')),
     entry_count INTEGER NOT NULL DEFAULT 0,
-    entries     TEXT                       -- JSON: [entry_id]
+    entries     TEXT,                      -- JSON: [entry_id]
+    is_seeded   INTEGER NOT NULL DEFAULT 0 -- 1 = demo seed data; pruned when the real L4 builder runs
 );
 
 CREATE TABLE IF NOT EXISTS graph_edges (
@@ -80,7 +81,8 @@ CREATE TABLE IF NOT EXISTS graph_edges (
     weight       REAL NOT NULL DEFAULT 0.0,
     is_hypothesis INTEGER NOT NULL DEFAULT 0,   -- 1 = model-proposed; shown with confirm/dismiss UI
     label        TEXT,                           -- human-readable edge label (e.g. "may lead to")
-    entries      TEXT                            -- JSON: [entry_id]
+    entries      TEXT,                           -- JSON: [entry_id]
+    is_seeded    INTEGER NOT NULL DEFAULT 0      -- 1 = demo seed data; pruned when the real L4 builder runs
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────

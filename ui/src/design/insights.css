@@ -9,7 +9,12 @@
 .insights {
   display: flex;
   flex-direction: column;
-  gap: var(--space-6);
+  gap: var(--space-5);
+}
+
+/* Sub-view tabs (Mood / Connections / Looking back) — reuses the .seg control. */
+.insights__tabs {
+  align-self: flex-start;
 }
 
 .insights__block {
@@ -232,4 +237,445 @@
   to {
     background-position: -200% 0;
   }
+}
+
+/* =============================================================================
+   Phase 14 — Knowledge graph ("Connections")
+   A bespoke force-directed SVG graph (no charting/graph dependency, matching the
+   mood chart's offline, tokens-only ethos). Node colours are six categorical
+   hues exposed as --nc per type class, reused by the legend and the panel tag.
+   ========================================================================== */
+.graph {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  gap: var(--space-4);
+  align-items: start;
+}
+@media (max-width: 880px) {
+  .graph {
+    grid-template-columns: 1fr;
+  }
+}
+
+.graph__canvas {
+  position: relative;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.graph__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none; /* let pointer-drag work without the page panning */
+}
+
+/* Node category colours (light). */
+.graph__node--theme { --nc: var(--c-moss-500); }
+.graph__node--emotion { --nc: var(--c-amber-500); }
+.graph__node--person { --nc: #5b7db1; }
+.graph__node--place { --nc: #4e9b6b; }
+.graph__node--goal { --nc: #8a6db1; }
+.graph__node--problem { --nc: var(--c-red); }
+[data-theme="dark"] .graph__node--theme { --nc: var(--c-moss-300); }
+[data-theme="dark"] .graph__node--emotion { --nc: var(--c-amber-300); }
+[data-theme="dark"] .graph__node--person { --nc: #8aa6d4; }
+[data-theme="dark"] .graph__node--place { --nc: #6fbf8e; }
+[data-theme="dark"] .graph__node--goal { --nc: #b095d6; }
+[data-theme="dark"] .graph__node--problem { --nc: #e07a70; }
+
+/* Edges. */
+.graph__edge {
+  stroke: var(--border-strong);
+  fill: none;
+  cursor: pointer;
+  transition: stroke var(--dur-fast) var(--ease-out), opacity var(--dur-fast) var(--ease-out);
+}
+.graph__edge--active {
+  stroke: var(--accent);
+}
+.graph__edge--dim {
+  opacity: 0.12;
+}
+/* Hypothesis edges render dashed — never as a plain edge (§7.4). */
+.graph__edge--hypothesis {
+  stroke: var(--text-muted);
+  stroke-dasharray: 5 4;
+}
+
+/* The "?" affordance at a hypothesis edge's midpoint. */
+.graph__hypmark {
+  cursor: pointer;
+}
+.graph__hypmark-bg {
+  fill: var(--surface-raised);
+  stroke: var(--text-muted);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 3;
+}
+.graph__hypmark-q {
+  fill: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  pointer-events: none;
+}
+
+/* Nodes. */
+.graph__node {
+  cursor: pointer;
+}
+.graph__node-dot {
+  fill: var(--nc);
+  stroke: var(--surface-raised);
+  stroke-width: 2;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.graph__node--active .graph__node-dot {
+  stroke: var(--text);
+  stroke-width: 2.5;
+}
+.graph__node--dim {
+  opacity: 0.28;
+}
+.graph__node-label {
+  fill: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--surface-sunken);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.graph__node--active .graph__node-label {
+  fill: var(--text);
+  font-weight: var(--weight-semibold);
+}
+
+/* Legend (overlaid bottom-left of the canvas). */
+.graph__legend {
+  position: absolute;
+  left: var(--space-3);
+  bottom: var(--space-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  max-width: calc(100% - var(--space-5));
+  padding: var(--space-2) var(--space-3);
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.graph__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.graph__legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-full);
+  background: var(--nc);
+}
+.graph__legend-dash {
+  width: 14px;
+  border-top: 1.6px dashed var(--text-muted);
+}
+
+/* Evidence panel. */
+.graph__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  min-height: 180px;
+}
+.graph__panel--empty {
+  justify-content: center;
+}
+.graph__panel-hint {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-align: center;
+  line-height: var(--leading-snug);
+}
+.graph__panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.graph__panel-tag {
+  display: inline-block;
+  margin-bottom: var(--space-1);
+  padding: 1px var(--space-2);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-on-accent);
+  background: var(--nc, var(--text-muted));
+  border-radius: var(--radius-full);
+}
+.graph__panel-tag--hyp {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px dashed var(--text-muted);
+}
+.graph__panel-title {
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+.graph__panel-close {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--radius-xs);
+}
+.graph__panel-close:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+/* Hypothesis confirm / dismiss block. */
+.graph__hyp {
+  padding: var(--space-3);
+  background: var(--surface-raised);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+.graph__hyp-claim {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--text-secondary);
+}
+.graph__hyp-note {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.graph__hyp-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.graph__hyp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1;
+  justify-content: center;
+  padding: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.graph__hyp-btn--confirm:hover {
+  background: var(--accent-soft);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+.graph__hyp-btn--dismiss:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.graph__hyp-done {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--accent-contrast);
+}
+
+.graph__panel-count {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.graph__evidence {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.graph__evidence-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.graph__evidence-date {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+.graph__evidence-text {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--text-muted);
+}
+
+/* =============================================================================
+   Phase 14 — Growth report ("Looking back")
+   Descriptive, never a verdict: two period cards, observational prose, theme
+   shifts, and a reflective closing question.
+   ========================================================================== */
+.growth {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.growth__periods {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-3);
+}
+@media (max-width: 720px) {
+  .growth__periods {
+    grid-template-columns: 1fr;
+  }
+  .growth__arrow {
+    transform: rotate(90deg);
+  }
+}
+.growth__arrow {
+  color: var(--text-muted);
+  font-size: var(--text-lg);
+}
+.growth__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.growth__card-label {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.growth__card-range {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.growth__card-stats {
+  display: flex;
+  gap: var(--space-5);
+  margin-top: var(--space-1);
+}
+.growth__stat {
+  display: flex;
+  flex-direction: column;
+}
+.growth__stat-num {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.growth__stat-lbl {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.growth__card-themes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+.growth__chip {
+  padding: 1px var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+}
+.growth__chip--emerged {
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.growth__chip--faded {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+
+.growth__narrative {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.growth__line {
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+  color: var(--text-secondary);
+}
+.growth__shifts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.growth__shift {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.growth__shift-label {
+  flex: 0 0 130px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.growth__shift-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.growth__question {
+  padding: var(--space-4);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  line-height: var(--leading-snug);
+  color: var(--text);
+}
+.growth__disclaimer {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-style: italic;
 }

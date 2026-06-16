@@ -32,7 +32,10 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # Bump this and add a migration block whenever schema.sql changes. The schema
 # file keeps the matching `PRAGMA user_version` as a comment; db.py is the
 # component that actually owns and writes the version (per §7.1's migration note).
-SCHEMA_USER_VERSION = 1
+#
+# v2 (Phase 14): added `is_seeded` to graph_nodes/graph_edges so a seeded demo
+# graph can be pruned later, mirroring the flag already on entries/mood_series.
+SCHEMA_USER_VERSION = 2
 
 
 def db_path() -> Path:
@@ -70,11 +73,44 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     current = conn.execute("PRAGMA user_version;").fetchone()[0]
     if current == 0:
-        # `PRAGMA user_version` does not accept bound parameters; the value is our
-        # own constant, never user input, so the f-string is safe here.
+        # Fresh database: ``schema.sql`` already created every table at the current
+        # shape, so just stamp the version. `PRAGMA user_version` does not accept
+        # bound parameters; the value is our own constant, never user input, so the
+        # f-string is safe here.
         conn.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION};")
         log.info("initialised eva.db schema at user_version=%d", SCHEMA_USER_VERSION)
+    elif current < SCHEMA_USER_VERSION:
+        _migrate(conn, current)
     conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
+    """Bring an existing database forward to ``SCHEMA_USER_VERSION``.
+
+    ``CREATE TABLE IF NOT EXISTS`` in ``schema.sql`` is a no-op once a table
+    exists, so a *column* added to an existing table never appears without an
+    explicit migration. Each step is idempotent (it checks before it alters) and
+    advances ``user_version`` so a re-run resumes where it left off.
+    """
+    if from_version < 2:
+        # v1 → v2: the is_seeded flag on the L4 graph tables (Phase 14).
+        _add_column_if_missing(conn, "graph_nodes", "is_seeded", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "graph_edges", "is_seeded", "INTEGER NOT NULL DEFAULT 0")
+        log.info("migrated eva.db schema v1 → v2 (graph is_seeded)")
+    conn.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION};")
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """``ALTER TABLE … ADD COLUMN`` only if ``column`` isn't already present.
+
+    Table/column/decl are our own constants (never user input), so interpolating
+    them into the DDL is safe; SQLite does not accept bound parameters for DDL.
+    """
+    existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def get_or_create_db() -> sqlite3.Connection:
@@ -346,3 +382,126 @@ def upsert_mood_series(
         ),
     )
     conn.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# L4 knowledge graph — read/write for graph_nodes & graph_edges (§7.1 / §7.4).
+#
+# The Phase-14 demo writes a *seeded* graph (is_seeded=1) via scripts/seed_demo.py
+# and reads it back through GET /insights/graph. The real L4 builder will write
+# is_seeded=0 rows through the same helpers; the read defaults to live-only
+# (is_seeded=0), with include_seeded=True lifting that for the demo — exactly the
+# recall rule the mood chart already follows.
+# ─────────────────────────────────────────────────────────────────────────────
+def insert_graph_node(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    label: str,
+    type: str,
+    entry_count: int,
+    entries: list[str],
+    is_seeded: bool = False,
+) -> None:
+    """Insert one ``graph_nodes`` row. ``type`` must be one of the §7.4 node enum.
+
+    ``entries`` (the evidence entry-ids behind the node) is JSON-encoded into the
+    TEXT column exactly as §7.1 documents. The CHECK constraint enforces the enum.
+    """
+    conn.execute(
+        """
+        INSERT INTO graph_nodes (id, label, type, entry_count, entries, is_seeded)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (id, label, type, entry_count, json.dumps(entries, ensure_ascii=False), 1 if is_seeded else 0),
+    )
+
+
+def insert_graph_edge(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    source: str,
+    target: str,
+    type: str,
+    weight: float,
+    is_hypothesis: bool,
+    label: str | None,
+    entries: list[str],
+    is_seeded: bool = False,
+) -> None:
+    """Insert one ``graph_edges`` row. ``type`` must be one of the §7.4 edge enum.
+
+    A hypothesis edge carries ``is_hypothesis=True`` and a human-readable ``label``
+    (e.g. "may lead to"); ordinary edges leave ``label`` ``None``. Both are
+    enforced by the §7.4 contract, not the DB, so the graph builder is responsible
+    for keeping ``type == 'hypothesis'`` aligned with ``is_hypothesis``.
+    """
+    conn.execute(
+        """
+        INSERT INTO graph_edges
+            (id, source, target, type, weight, is_hypothesis, label, entries, is_seeded)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            id, source, target, type, weight, 1 if is_hypothesis else 0,
+            label, json.dumps(entries, ensure_ascii=False), 1 if is_seeded else 0,
+        ),
+    )
+
+
+def clear_seeded_graph(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Delete every ``is_seeded=1`` node and edge; return (nodes, edges) removed.
+
+    Edges are deleted first so the ``graph_edges → graph_nodes`` foreign key never
+    blocks a node delete. Real graph rows (``is_seeded=0``) are never touched, so a
+    re-seed is clean and the future L4 output would survive a demo re-seed.
+    """
+    n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges WHERE is_seeded=1").fetchone()[0]
+    n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes WHERE is_seeded=1").fetchone()[0]
+    conn.execute("DELETE FROM graph_edges WHERE is_seeded=1")
+    conn.execute("DELETE FROM graph_nodes WHERE is_seeded=1")
+    conn.commit()
+    return n_nodes, n_edges
+
+
+def graph_nodes_all(
+    conn: sqlite3.Connection, *, include_seeded: bool = False
+) -> list[sqlite3.Row]:
+    """Return graph nodes; live-only by default, all rows when ``include_seeded``."""
+    where = "" if include_seeded else "WHERE is_seeded = 0"
+    return conn.execute(f"SELECT * FROM graph_nodes {where} ORDER BY entry_count DESC, label ASC").fetchall()
+
+
+def graph_edges_all(
+    conn: sqlite3.Connection, *, include_seeded: bool = False
+) -> list[sqlite3.Row]:
+    """Return graph edges; live-only by default, all rows when ``include_seeded``."""
+    where = "" if include_seeded else "WHERE is_seeded = 0"
+    return conn.execute(f"SELECT * FROM graph_edges {where} ORDER BY weight DESC").fetchall()
+
+
+def seeded_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return every seeded entry joined to its done extraction (graph build input).
+
+    The Phase-14 graph builder reads this: each row carries the entry's ``id``,
+    ``date``, ``text``, and the extraction's ``themes``/``emotions``/``entities``
+    JSON, so the seeded graph is derived from the *same* data the mood chart uses
+    — honest co-occurrence, not invented links.
+    """
+    return conn.execute(
+        """
+        SELECT
+            e.id        AS entry_id,
+            e.date      AS date,
+            e.text      AS text,
+            x.themes    AS themes,
+            x.emotions  AS emotions,
+            x.entities  AS entities,
+            x.summary   AS summary
+        FROM entries e
+        JOIN extractions x ON x.entry_id = e.id
+        WHERE e.is_seeded = 1 AND x.extraction_status = 'done'
+        ORDER BY e.date ASC
+        """
+    ).fetchall()

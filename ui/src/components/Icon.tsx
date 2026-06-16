@@ -29,7 +29,9 @@ export type IconName =
   | "mic"
   | "speaker"
   | "speaker-off"
-  | "stop";
+  | "stop"
+  | "check"
+  | "close";
 
 type IconProps = {
   name: IconName;
@@ -149,6 +151,8 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   stop: <rect x="6" y="6" width="12" height="12" rx="2.5" />,
+  check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
+  close: <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />,
 };
 
 export function Icon({ name, size = 20, className, label }: IconProps) {

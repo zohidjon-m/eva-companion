@@ -47,6 +47,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from memory import db  # noqa: E402
+from memory import graph as graph_builder  # noqa: E402
 
 log = logging.getLogger("eva.seed")
 
@@ -221,6 +222,13 @@ def main() -> int:
             len(seeded), seeded[0]["date"], seeded[-1]["date"],
             min(moods), max(moods), len(seeded) - len(moods),
         )
+
+        # Phase 14: derive the seeded knowledge graph from the same extractions
+        # (themes/emotions + a curated lexicon over the entry text). All rows are
+        # is_seeded=1 so the future L4 builder can prune them. This is honest
+        # co-occurrence, not invented links — every node/edge cites real entries.
+        n_nodes, n_edges = graph_builder.store_seed_graph(conn)
+        log.info("seeded knowledge graph: %d node(s), %d edge(s)", n_nodes, n_edges)
     finally:
         conn.close()
 

@@ -37,10 +37,10 @@ EXPECTED_COLUMNS = {
         "open_loops", "self_judgments", "summary", "extracted_at",
     ],
     "mood_series": ["id", "entry_id", "date", "mood", "emotions", "is_seeded"],
-    "graph_nodes": ["id", "label", "type", "entry_count", "entries"],
+    "graph_nodes": ["id", "label", "type", "entry_count", "entries", "is_seeded"],
     "graph_edges": [
         "id", "source", "target", "type", "weight", "is_hypothesis",
-        "label", "entries",
+        "label", "entries", "is_seeded",
     ],
     "digests": [
         "id", "level", "period_start", "period_end", "summary", "stats",
@@ -73,7 +73,7 @@ def test_columns_exact(db, table, cols):
 def test_user_version_stamped(db):
     db_mod, conn = db
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == db_mod.SCHEMA_USER_VERSION == 1
+    assert version == db_mod.SCHEMA_USER_VERSION == 2
 
 
 def test_entries_type_check_constraint(db):
@@ -102,6 +102,45 @@ def test_foreign_key_cascade_on(db):
     conn.commit()
     remaining = conn.execute("SELECT COUNT(*) FROM extractions").fetchone()[0]
     assert remaining == 0, "ON DELETE CASCADE did not fire (foreign_keys off?)"
+
+
+def test_v1_to_v2_migration_adds_graph_is_seeded(db):
+    """An existing v1 db (graph tables without is_seeded) migrates forward cleanly.
+
+    Simulates the pre-Phase-14 schema by dropping the column and resetting the
+    version, then re-runs init_db and asserts the column is back and the version
+    advanced — the ``CREATE TABLE IF NOT EXISTS`` path alone would never add it.
+    """
+    db_mod, conn = db
+    conn.executescript(
+        """
+        DROP TABLE graph_edges;
+        DROP TABLE graph_nodes;
+        CREATE TABLE graph_nodes (
+            id TEXT PRIMARY KEY, label TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('theme','person','place','goal','problem','emotion')),
+            entry_count INTEGER NOT NULL DEFAULT 0, entries TEXT
+        );
+        CREATE TABLE graph_edges (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL REFERENCES graph_nodes(id),
+            target TEXT NOT NULL REFERENCES graph_nodes(id),
+            type TEXT NOT NULL CHECK(type IN ('co_occurrence','temporal','similarity','hypothesis')),
+            weight REAL NOT NULL DEFAULT 0.0, is_hypothesis INTEGER NOT NULL DEFAULT 0,
+            label TEXT, entries TEXT
+        );
+        PRAGMA user_version = 1;
+        """
+    )
+    conn.commit()
+    assert "is_seeded" not in {r["name"] for r in conn.execute("PRAGMA table_info(graph_nodes)")}
+
+    db_mod.init_db(conn)  # runs the v1 → v2 migration
+
+    for table in ("graph_nodes", "graph_edges"):
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        assert "is_seeded" in cols, f"{table}.is_seeded not added by migration"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_init_db_idempotent(db):
