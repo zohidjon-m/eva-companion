@@ -258,6 +258,66 @@ def get_extraction(conn: sqlite3.Connection, entry_id: str) -> sqlite3.Row | Non
     ).fetchone()
 
 
+def mood_series_range(
+    conn: sqlite3.Connection,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    include_seeded: bool = False,
+) -> list[sqlite3.Row]:
+    """Return mood points for the chart, oldest first, joined to their summary.
+
+    This is the read side of the Phase-12 mood chart (``GET /insights/mood``):
+    pure SQL over the denormalised ``mood_series`` table, no LLM. Each row carries
+    the entry's ``date``, its ``mood`` (an integer, or NULL — which the chart
+    renders as a *gap*, never as zero, per §7.1), the ``emotions`` JSON copied at
+    extraction time, ``is_seeded``, and the ``summary`` from the L1 ``extractions``
+    row so a hovered point can show that day's reflection.
+
+    Filtering follows §7.1's recall rule, applied here to the chart: live data is
+    ``is_seeded = 0`` only; ``include_seeded=True`` (the demo chart) lifts that
+    filter so the backdated seed month is shown alongside any real entries. The
+    optional ``date_from`` / ``date_to`` bounds (inclusive, ``YYYY-MM-DD``) back
+    the 7-/30-day toggle. Ordering is by day, then by the entry's ``created_at`` so
+    multiple turns on one day plot left-to-right in the order they were written.
+
+    The join to ``extractions`` is a LEFT join: a mood point always comes from a
+    successful extraction (that is the only path that writes ``mood_series``), but
+    keeping it left-outer means a future seeding path that writes a mood row
+    without an extraction still charts, just without a hover summary.
+    """
+    clauses: list[str] = []
+    params: list = []
+    if not include_seeded:
+        clauses.append("ms.is_seeded = 0")
+    if date_from is not None:
+        clauses.append("ms.date >= ?")
+        params.append(date_from)
+    if date_to is not None:
+        clauses.append("ms.date <= ?")
+        params.append(date_to)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    return conn.execute(
+        f"""
+        SELECT
+            ms.entry_id   AS entry_id,
+            ms.date       AS date,
+            ms.mood       AS mood,
+            ms.emotions   AS emotions,
+            ms.is_seeded  AS is_seeded,
+            x.summary     AS summary,
+            e.created_at  AS created_at
+        FROM mood_series ms
+        JOIN entries e ON e.id = ms.entry_id
+        LEFT JOIN extractions x ON x.entry_id = ms.entry_id
+        {where}
+        ORDER BY ms.date ASC, e.created_at ASC, ms.rowid ASC
+        """,
+        params,
+    ).fetchall()
+
+
 def upsert_mood_series(
     conn: sqlite3.Connection,
     *,

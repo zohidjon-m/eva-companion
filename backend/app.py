@@ -26,6 +26,7 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -610,6 +611,77 @@ async def acknowledge_journal(body: AcknowledgeIn) -> dict:
     if text is None:
         raise HTTPException(status_code=404, detail="entry not found")
     return {"acknowledgment": await _journal_acknowledgment(text)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 12 — Insights: mood capture + chart. The first real Insights block.
+#
+# GET /insights/mood is pure SQL over the denormalised mood_series table — no LLM
+# (the moods were extracted at capture time in Phase 2). It honours §7.1's recall
+# rule: live data only (is_seeded = 0) by default, with ?include_seeded=true for
+# the demo chart so the backdated seed month (scripts/seed_demo.py) is shown. NULL
+# mood is preserved as null all the way to the UI, which renders it as a gap in
+# the line — never as zero.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _decode_emotions(raw: str | None) -> list:
+    """Decode the stored emotions JSON into a list, tolerating bad/empty values.
+
+    ``mood_series.emotions`` is a JSON copy made at extraction time; a malformed or
+    NULL value must never break the chart, so anything that doesn't parse into a
+    list degrades to ``[]`` (the point still plots from its mood).
+    """
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+@app.get("/insights/mood")
+def insights_mood(
+    date_from: str | None = Query(None, alias="from", description="Inclusive start day, YYYY-MM-DD."),
+    date_to: str | None = Query(None, alias="to", description="Inclusive end day, YYYY-MM-DD."),
+    include_seeded: bool = Query(False, description="Include is_seeded=1 demo rows (the demo chart)."),
+) -> dict:
+    """Return the mood time-series for the chart, oldest point first.
+
+    Each point is ``{entry_id, date, mood, emotions, summary, is_seeded}``. ``mood``
+    is an integer −5..+5 or ``null`` (a NULL extraction); the UI draws ``null`` as a
+    gap, never zero (§7.1). ``summary`` is the entry's 4–5 sentence reflection for
+    the hover tooltip (``null`` if the extraction stored none).
+
+    Defaults to live data only (``is_seeded = 0``); ``include_seeded=true`` lifts
+    that filter for the demo. The optional ``from``/``to`` bounds back the 7-/30-day
+    toggle. No model is touched — this is a denormalised SQL read.
+    """
+    for label, value in (("from", date_from), ("to", date_to)):
+        if value is not None and not _DATE_RE.match(value):
+            raise HTTPException(status_code=400, detail=f"'{label}' must be YYYY-MM-DD")
+
+    conn = db.get_or_create_db()
+    try:
+        rows = db.mood_series_range(
+            conn, date_from=date_from, date_to=date_to, include_seeded=include_seeded
+        )
+    finally:
+        conn.close()
+
+    points = [
+        {
+            "entry_id": r["entry_id"],
+            "date": r["date"],
+            "mood": r["mood"],  # int or None — the UI renders None as a gap
+            "emotions": _decode_emotions(r["emotions"]),
+            "summary": r["summary"],
+            "is_seeded": bool(r["is_seeded"]),
+        }
+        for r in rows
+    ]
+    return {"from": date_from, "to": date_to, "include_seeded": include_seeded, "points": points}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
