@@ -1,4 +1,5 @@
 """Phase 7 — corpus retrieval and the grounded-citation discipline.
+Phase 11 — journal memory recall (the "Eva remembers" tests live at the bottom).
 
 The vector store is mocked so these test retrieval's own logic: the relevance
 threshold (the thing that makes "not in the library" return nothing rather than a
@@ -7,6 +8,8 @@ the fail-soft behaviour when the store errors.
 """
 
 from __future__ import annotations
+
+from datetime import date
 
 from memory import retrieval
 
@@ -108,3 +111,162 @@ def test_format_corpus_context_numbers_and_labels():
 def test_format_corpus_context_empty_is_blank():
     # An empty list yields "" so the prompt assembler drops the corpus slot.
     assert retrieval.format_corpus_context([]) == ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 11 — memory recall ("Eva remembers"). vector.recall is mocked so these
+# exercise recall's own logic: the anti-fabrication threshold, recency weighting,
+# the chip label, and the prompt-context formatting.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _journals(docs, metas, dists):
+    """Build a ChromaDB-shaped recall result (one query → index 0 lists)."""
+    return {"documents": [docs], "metadatas": [metas], "distances": [dists]}
+
+
+def _meta(entry_id, date_str, *, mood=None, themes="work, family"):
+    """A journals-collection metadata row as vector.embed_summary stores it."""
+    m = {"entry_id": entry_id, "date": date_str, "themes": themes, "is_seeded": False}
+    if mood is not None:
+        m["mood"] = mood
+    return m
+
+
+def test_recall_threshold_drops_irrelevant_memories(monkeypatch):
+    # Two near summaries, one far-off; only those within max_distance survive — the
+    # gate that stops an off-topic message surfacing a (false) memory.
+    raw = _journals(
+        docs=["near one", "near two", "way off"],
+        metas=[
+            _meta("e1", "2026-06-10"),
+            _meta("e2", "2026-06-09"),
+            _meta("e3", "2026-06-08"),
+        ],
+        dists=[0.20, 0.30, 0.90],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall", lambda q, n_results: raw)
+
+    mems = retrieval.recall_memories(
+        "a relevant message", max_distance=0.40, today=date(2026, 6, 11)
+    )
+    assert {m.entry_id for m in mems} == {"e1", "e2"}
+
+
+def test_recall_never_fabricates_when_nothing_relevant(monkeypatch):
+    # The Phase-11 honesty rule: ask about something never journaled → no memory,
+    # so no context block and (in the handler) no chip.
+    raw = _journals(
+        docs=["unrelated life event"],
+        metas=[_meta("e9", "2026-06-01")],
+        dists=[1.30],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall", lambda q, n_results: raw)
+    assert retrieval.recall_memories("a topic never written about") == []
+
+
+def test_recall_is_recency_weighted_among_relevant(monkeypatch):
+    # Two memories cleared the gate at the SAME distance; the more recent one ranks
+    # first. Recency only reorders memories that are already relevant.
+    raw = _journals(
+        docs=["older but relevant", "newer and relevant"],
+        metas=[_meta("old", "2026-04-01"), _meta("new", "2026-06-10")],
+        dists=[0.30, 0.30],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall", lambda q, n_results: raw)
+
+    mems = retrieval.recall_memories("relevant message", today=date(2026, 6, 11))
+    assert [m.entry_id for m in mems] == ["new", "old"]
+
+
+def test_recall_relevance_outranks_recency(monkeypatch):
+    # Recency must NOT override relevance: a much closer (older) memory still beats a
+    # barely-relevant fresh one, because the recency floor preserves most of the
+    # relevance signal. This is what keeps recall honest rather than just "recent".
+    raw = _journals(
+        docs=["strongly relevant, older", "weakly relevant, today"],
+        metas=[_meta("strong", "2026-03-01"), _meta("weak", "2026-06-11")],
+        dists=[0.10, 0.54],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall", lambda q, n_results: raw)
+
+    mems = retrieval.recall_memories("message", today=date(2026, 6, 11))
+    assert mems[0].entry_id == "strong"
+
+
+def test_recall_keeps_at_most_top_k(monkeypatch):
+    raw = _journals(
+        docs=[f"s{i}" for i in range(6)],
+        metas=[_meta(f"e{i}", "2026-06-10") for i in range(6)],
+        dists=[0.10 + i * 0.01 for i in range(6)],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall", lambda q, n_results: raw)
+    mems = retrieval.recall_memories("msg", top_k=3, today=date(2026, 6, 11))
+    assert len(mems) == 3
+
+
+def test_recall_empty_query_does_not_query_store(monkeypatch):
+    called = {"n": 0}
+
+    def spy(q, n_results):
+        called["n"] += 1
+        return _journals([], [], [])
+
+    monkeypatch.setattr(retrieval.vector, "recall", spy)
+    assert retrieval.recall_memories("   ") == []
+    assert called["n"] == 0
+
+
+def test_recall_store_error_degrades_to_no_memories(monkeypatch):
+    def boom(q, n_results):
+        raise RuntimeError("chroma down")
+
+    monkeypatch.setattr(retrieval.vector, "recall", boom)
+    # Must not raise — a recall failure is a non-event, never a crash.
+    assert retrieval.recall_memories("anything") == []
+
+
+def test_memory_chip_label_is_short_human_date():
+    m = retrieval.Memory("e1", "2026-06-03", "summary", mood=2, themes=["work"], distance=0.2)
+    assert m.chip_label() == "Jun 3"
+    assert m.as_chip() == {"date": "2026-06-03", "label": "Jun 3"}
+
+
+def test_memory_chip_label_tolerates_bad_date():
+    m = retrieval.Memory("e1", "not-a-date", "s", mood=None, themes=[], distance=0.2)
+    # Falls back to the raw string rather than crashing the chip.
+    assert m.chip_label() == "not-a-date"
+
+
+def test_parse_memory_results_splits_themes_back_to_list(monkeypatch):
+    raw = _journals(
+        docs=["a summary"],
+        metas=[_meta("e1", "2026-06-10", mood=3, themes="work, family, prayer")],
+        dists=[0.20],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall", lambda q, n_results: raw)
+    mems = retrieval.recall_memories("msg", today=date(2026, 6, 11))
+    assert mems[0].themes == ["work", "family", "prayer"]
+    assert mems[0].mood == 3
+
+
+def test_format_memory_context_prefixes_each_with_its_date():
+    mems = [
+        retrieval.Memory("e1", "2026-06-03", "first summary", None, [], 0.2),
+        retrieval.Memory("e2", "2026-05-28", "second summary", None, [], 0.3),
+    ]
+    out = retrieval.format_memory_context(mems)
+    assert "[2026-06-03] first summary" in out
+    assert "[2026-05-28] second summary" in out
+    assert out.index("2026-06-03") < out.index("2026-05-28")
+
+
+def test_format_memory_context_empty_is_blank():
+    # Empty → "" so the assembler drops the memory slot (no past entry to reference).
+    assert retrieval.format_memory_context([]) == ""
+
+
+def test_memory_max_distance_is_in_a_sane_gating_range():
+    # A conservative starting value pending tuning on a real vault (see retrieval.py):
+    # tight enough to gate fabrication, loose enough to recall genuine matches.
+    assert 0.4 <= retrieval.MEMORY_MAX_DISTANCE <= 0.7

@@ -9,7 +9,7 @@ import { Icon } from "../components";
 import { MicButton } from "../voice/MicButton";
 import { appendTranscript } from "../voice/text";
 import { useVoice } from "../voice/VoiceContext";
-import { useChat, type Citation, type Message } from "./useChat";
+import { useChat, type Citation, type Memory, type Message } from "./useChat";
 
 /**
  * ChatScreen — the Phase 4 chat surface, wired to `WS /chat` via useChat.
@@ -101,13 +101,16 @@ function ChatGreeting() {
 
 /** One message row — Eva left, user right. Eva shows typing dots until tokens land. */
 function Bubble({ message }: { message: Message }) {
-  const { role, text, streaming, failed, citations } = message;
+  const { role, text, streaming, failed, citations, memories } = message;
   const isEva = role === "eva";
   const waiting = isEva && streaming && text === "";
 
   return (
     <div className={`msg msg--${role}`}>
       <div className="msg__content">
+        {isEva && memories && memories.length > 0 && (
+          <Memories memories={memories} />
+        )}
         <div
           className={[
             "bubble",
@@ -130,6 +133,31 @@ function Bubble({ message }: { message: Message }) {
           <Citations citations={citations} />
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The "Eva remembers" cue (Phase 11) — a subtle line above her reply naming the
+ * past day(s) she recalled for this turn. It sits ABOVE the bubble (citations sit
+ * below) so the demo audience reads "remembering Jun 3" as Eva reaches back, just
+ * before she answers. Chips are non-interactive on purpose: this is a quiet "she
+ * remembered", not a doorway into the entry — re-reading lives in Journal browse.
+ * Chips only ever render from memories the backend sent, each gated by relevance,
+ * so a chip can never name a day Eva didn't genuinely recall.
+ */
+function Memories({ memories }: { memories: Memory[] }) {
+  return (
+    <div className="remember">
+      <Icon name="sparkle" size={13} className="remember__mark" />
+      <span className="remember__label">Remembering</span>
+      <span className="remember__chips">
+        {memories.map((m) => (
+          <span key={m.date} className="remember__chip">
+            {m.label}
+          </span>
+        ))}
+      </span>
     </div>
   );
 }

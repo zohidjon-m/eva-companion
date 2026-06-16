@@ -16,17 +16,19 @@ from fastapi.testclient import TestClient
 from app import app
 from llm import client as llm_client
 from llm import server as llm_server
-from memory import capture
+from memory import capture, retrieval
 
 
 def _stub_capture(monkeypatch):
     """Neutralize the Phase-4 capture side-effects for the WS protocol tests.
 
-    The `/chat` socket now persists each user turn and schedules background
-    extraction. These tests are about the wire protocol, not storage, so we stub
-    both halves: capture returns a fake record and extraction is a no-op. Returns
-    a list that records the texts capture was called with, so a test can assert
-    the turn was captured.
+    The `/chat` socket now persists each user turn, schedules background
+    extraction, and (Phase 11) recalls past memories. These tests are about the
+    wire protocol, not storage, so we stub all three: capture returns a fake
+    record, extraction is a no-op, and recall returns nothing (so no memory frame
+    is emitted and the protocol stays the deterministic start→token…→done these
+    tests assert). Returns a list that records the texts capture was called with,
+    so a test can assert the turn was captured.
     """
     captured: list[str] = []
 
@@ -42,6 +44,7 @@ def _stub_capture(monkeypatch):
 
     monkeypatch.setattr(capture, "capture_entry", fake_capture)
     monkeypatch.setattr(capture, "run_extraction_and_embed", fake_extract)
+    monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [])
     return captured
 
 

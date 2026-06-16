@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *   → send `{ text, capture:false, voice }`  retry of an already-saved turn
  *   ← { type:"start" }              Eva is about to speak
  *   ← { type:"citations", citations } grounded sources for this turn (Phase 7)
+ *   ← { type:"memory", memories }   past entries Eva recalled this turn (Phase 11)
  *   ← { type:"token", content }     one streamed piece
  *   ← { type:"done" }               text reply complete
  *   ← { type:"audio", seq, data }   one synthesized sentence (Phase 9, voice on)
@@ -48,6 +49,18 @@ export type Citation = {
   text: string;
 };
 
+/**
+ * One past journal entry Eva recalled for this turn (Phase 11 "Eva remembers").
+ * Deliberately minimal — just the day — so the chip is a subtle "she remembered
+ * this" cue, not a window back into the entry's text.
+ */
+export type Memory = {
+  /** ISO day of the recalled entry, e.g. "2026-06-03". */
+  date: string;
+  /** Short human label for the chip, e.g. "Jun 3". */
+  label: string;
+};
+
 export type Message = {
   id: string;
   role: ChatRole;
@@ -58,11 +71,14 @@ export type Message = {
   failed?: boolean;
   /** Grounded sources for this Eva turn (absent when nothing was retrieved). */
   citations?: Citation[];
+  /** Past entries Eva recalled for this turn (absent when nothing was recalled). */
+  memories?: Memory[];
 };
 
 type ServerFrame =
   | { type: "start" }
   | { type: "citations"; citations: Citation[] }
+  | { type: "memory"; memories: Memory[] }
   | { type: "token"; content: string }
   | { type: "done" }
   | { type: "audio"; seq: number; format: string; text: string; data: string }
@@ -139,6 +155,16 @@ export function useChat(voice?: VoiceWiring): UseChat {
     );
   };
 
+  // Attach the past entries Eva recalled to the live Eva bubble (arrives before
+  // the first token, like citations). Drives the subtle "Remembering …" chip.
+  const attachMemories = (memories: Memory[]) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === streamingId.current ? { ...m, memories } : m,
+      ),
+    );
+  };
+
   // End the current stream. Targets the live bubble by its `streaming` flag
   // (there is only ever one) rather than an id, so it stays correct even if a
   // superseded socket fires late. On failure an empty Eva bubble (the error
@@ -195,6 +221,9 @@ export function useChat(voice?: VoiceWiring): UseChat {
           break; // placeholder bubble already shows the typing indicator
         case "citations":
           attachCitations(frame.citations);
+          break;
+        case "memory":
+          attachMemories(frame.memories);
           break;
         case "token":
           appendToken(frame.content);
