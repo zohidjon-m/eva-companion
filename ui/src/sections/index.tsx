@@ -1,11 +1,10 @@
-import { Button, EmptyState } from "../components";
 import type { SectionId } from "../nav";
 import { ChatScreen } from "../chat/ChatScreen";
 import { JournalScreen } from "../journal/JournalScreen";
 import { LibraryScreen } from "../library/LibraryScreen";
 import { InsightsScreen } from "../insights/InsightsScreen";
 import { SettingsScreen } from "../settings/SettingsScreen";
-import { ProfileArt } from "./illustrations";
+import { ProfileScreen } from "../profile/ProfileScreen";
 
 /**
  * Section screens — one per nav item. In Phase 3 every section is an intentional
@@ -15,10 +14,6 @@ import { ProfileArt } from "./illustrations";
  * Later phases replace the body of the matching component with the real screen;
  * the registry at the bottom is what the shell renders against the active id.
  */
-
-function comingIn(phase: string) {
-  return <>Arriving in {phase}.</>;
-}
 
 function ChatSection() {
   // Phase 4: the real chat surface, streaming over WS /chat. It manages its own
@@ -50,20 +45,12 @@ function InsightsSection() {
 }
 
 function ProfileSection() {
-  return (
-    <EmptyState
-      illustration={<ProfileArt />}
-      eyebrow="Profile"
-      title="Eva is still getting to know you"
-      description="Over time Eva builds a private picture of what you care about — your goals, your values, the people who matter. You'll always be able to read it, edit it, and delete any of it."
-      action={
-        <Button variant="secondary" disabled>
-          No profile yet
-        </Button>
-      }
-      footnote={comingIn("Phase 13")}
-    />
-  );
+  // Phase 13: the real Profile surface — renders profile.md (the human view of
+  // the structured profile.json behind the L3 seam), with an edit affordance that
+  // saves corrections back via the §7.2 sync. Renders in the standard content
+  // column under the page header (like Library/Insights/Settings). It owns its own
+  // empty state when there is no profile yet, so it returns just its surface.
+  return <ProfileScreen />;
 }
 
 function SettingsSection() {

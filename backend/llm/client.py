@@ -40,6 +40,12 @@ CHAT_URL = f"{server.BASE_URL}/v1/chat/completions"
 CHAT_TEMPERATURE = 1.0
 CHAT_TOP_P = 0.95
 CHAT_TOP_K = 64
+# Stop generation at the gemma turn boundary. The GGUF's embedded template should
+# stop here on its own, but if it doesn't, the model runs past <end_of_turn> and
+# regenerates a whole new turn — which `_strip_leaks` then hides by removing the
+# marker, so the reply renders as a verbatim duplicate. Passing the markers as a
+# hard `stop` halts generation at the boundary instead of stripping-and-continuing.
+CHAT_STOP = ["<end_of_turn>", "<eos>"]
 # Extraction sampling: low temperature for consistently parseable JSON.
 EXTRACT_TEMPERATURE = 0.3
 
@@ -141,7 +147,7 @@ async def stream_chat(
     top_p: float | None = CHAT_TOP_P,
     top_k: int | None = CHAT_TOP_K,
     priority: bool = True,
-    stop: list[str] | None = None,
+    stop: list[str] | None = CHAT_STOP,
 ) -> AsyncIterator[str]:
     """Stream a chat reply token-by-token from the model server.
 
@@ -195,7 +201,7 @@ async def complete_chat(
     top_p: float | None = CHAT_TOP_P,
     top_k: int | None = CHAT_TOP_K,
     priority: bool = False,
-    stop: list[str] | None = None,
+    stop: list[str] | None = CHAT_STOP,
 ) -> str:
     """Return a full (non-streamed) chat completion as text.
 

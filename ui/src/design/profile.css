@@ -1,0 +1,152 @@
+/* =============================================================================
+   Eva — Profile (Phase 13). What Eva understands about you, rendered from
+   profile.md, with a plain-text editor for your own corrections.
+   Renders inside the centered content column under the page header.
+   ========================================================================== */
+
+.profile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 720px;
+}
+
+/* The bar above the document: a gentle note + the Edit affordance. */
+.profile__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.profile__bar-note {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+}
+
+/* The rendered profile.md, as a calm document card. */
+.profile__doc {
+  padding: var(--space-6) var(--space-7);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.profile__h1 {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  color: var(--text);
+  margin: 0 0 var(--space-2);
+}
+.profile__h2 {
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  color: var(--text);
+  margin: var(--space-6) 0 var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+.profile__h2:first-of-type {
+  margin-top: var(--space-4);
+}
+.profile__h3 {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  margin: var(--space-4) 0 var(--space-1);
+}
+.profile__p {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  line-height: var(--leading-relaxed);
+  margin: var(--space-2) 0;
+}
+.profile__p strong,
+.profile__list strong {
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+}
+.profile__list {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.profile__list li {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  line-height: var(--leading-relaxed);
+}
+
+/* The editor (edit mode) — raw Markdown in a calm monospace-free field. */
+.profile--editing {
+  max-width: 720px;
+}
+.profile__editor {
+  width: 100%;
+  min-height: 420px;
+  resize: vertical;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  box-shadow: var(--shadow-xs);
+}
+.profile__editor:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.profile__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+/* Status / feedback rows. */
+.profile__status,
+.profile__error {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+}
+.profile__error {
+  color: var(--danger);
+}
+.profile__saved {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--ok);
+}
+.profile__warnings {
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-md);
+  background: var(--bg-tint);
+}
+.profile__warnings-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text);
+  margin-bottom: var(--space-2);
+}
+.profile__warnings ul {
+  margin: 0;
+  padding-left: var(--space-5);
+}
+.profile__warnings li {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+}
