@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import {
   fetchAck,
   fetchDay,
@@ -43,7 +50,9 @@ export type JournalView = { kind: "write" } | { kind: "day"; date: string };
 export type UseJournal = {
   today: string;
   draft: string;
-  setDraft: (text: string) => void;
+  /** The raw state setter — accepts a string or an updater, so callers (e.g. the
+   *  mic button appending a transcript) can build on the latest draft safely. */
+  setDraft: Dispatch<SetStateAction<string>>;
   /** Epoch ms the draft was last written to disk, or null if nothing pending. */
   draftSavedAt: number | null;
   saving: boolean;

@@ -25,7 +25,8 @@ export type IconName =
   | "upload"
   | "file"
   | "trash"
-  | "alert";
+  | "alert"
+  | "mic";
 
 type IconProps = {
   name: IconName;
@@ -123,6 +124,13 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M12 4.5l8.5 14.5H3.5z" />
       <path d="M12 10v4M12 16.7v.3" />
+    </>
+  ),
+  mic: (
+    <>
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M6 11.5a6 6 0 0 0 12 0" />
+      <path d="M12 17.5V21M9 21h6" />
     </>
   ),
 };

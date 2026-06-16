@@ -3,10 +3,10 @@ import type { SectionId } from "../nav";
 import { ChatScreen } from "../chat/ChatScreen";
 import { JournalScreen } from "../journal/JournalScreen";
 import { LibraryScreen } from "../library/LibraryScreen";
+import { SettingsScreen } from "../settings/SettingsScreen";
 import {
   InsightsArt,
   ProfileArt,
-  SettingsArt,
 } from "./illustrations";
 
 /**
@@ -78,20 +78,10 @@ function ProfileSection() {
 }
 
 function SettingsSection() {
-  return (
-    <EmptyState
-      illustration={<SettingsArt />}
-      eyebrow="Settings"
-      title="Make Eva yours"
-      description="Vault location, voice, model, and appearance will live here. The light/dark switch in the top bar already works — the rest of the controls land alongside the features they belong to."
-      action={
-        <Button variant="secondary" disabled>
-          More settings soon
-        </Button>
-      }
-      footnote={comingIn("Phase 10")}
-    />
-  );
+  // Phase 8: the first real, wired control — the Whisper speech-to-text model
+  // size. Renders in the standard content column under the page header; the rest
+  // of the settings store arrives in Phase 10.
+  return <SettingsScreen />;
 }
 
 /** Maps the active nav id to its screen. */
