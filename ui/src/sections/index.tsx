@@ -3,11 +3,9 @@ import type { SectionId } from "../nav";
 import { ChatScreen } from "../chat/ChatScreen";
 import { JournalScreen } from "../journal/JournalScreen";
 import { LibraryScreen } from "../library/LibraryScreen";
+import { InsightsScreen } from "../insights/InsightsScreen";
 import { SettingsScreen } from "../settings/SettingsScreen";
-import {
-  InsightsArt,
-  ProfileArt,
-} from "./illustrations";
+import { ProfileArt } from "./illustrations";
 
 /**
  * Section screens — one per nav item. In Phase 3 every section is an intentional
@@ -44,20 +42,11 @@ function LibrarySection() {
 }
 
 function InsightsSection() {
-  return (
-    <EmptyState
-      illustration={<InsightsArt />}
-      eyebrow="Insights"
-      title="Patterns take a little time"
-      description="As you write, Eva quietly notices the shape of things — your moods, the themes that recur, the threads worth pulling on. A few entries from now, this page starts to fill in."
-      action={
-        <Button variant="secondary" disabled>
-          Nothing to show yet
-        </Button>
-      }
-      footnote={comingIn("Phases 11–14")}
-    />
-  );
+  // Phase 12: the first real Insights block — a mood chart over the data Eva
+  // already extracts. Renders in the standard content column under the page
+  // header (like Library), so it returns just its own surface. Later phases
+  // (14) add the graph and growth views beneath it.
+  return <InsightsScreen />;
 }
 
 function ProfileSection() {
