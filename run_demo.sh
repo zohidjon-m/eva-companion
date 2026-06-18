@@ -44,26 +44,19 @@ if [ "$DO_DRILLS" -eq 1 ]; then
 fi
 
 echo "── Launching the app (backend :8000 + frontend :1420) ──────────────────"
-# The model server needs an interpreter with llama-cpp-python; the backend's own
-# .venv may not have it. Probe candidates and pick the first that imports llama_cpp.
-LLAMA_PY=""
-for p in /opt/anaconda3/bin/python "$HOME/anaconda3/bin/python" \
-         "$HOME/opt/anaconda3/bin/python" "$HOME/miniconda3/bin/python" \
-         /opt/homebrew/bin/python3 "$(command -v python3 || true)"; do
-  if [ -x "$p" ] && "$p" -c "import llama_cpp" >/dev/null 2>&1; then
-    LLAMA_PY="$p"; break
-  fi
-done
-if [ -z "$LLAMA_PY" ]; then
-  echo "[demo] WARNING: no python with llama-cpp-python found — chat/voice will be"
-  echo "[demo]          offline. Insights (mood/graph/growth) and the UI still work."
+# The backend launches the model server itself. It prefers the native llama.cpp
+# `llama-server` binary (brew install llama.cpp); if that's absent it falls back
+# to any Python with llama-cpp-python. No interpreter probe needed here anymore.
+if ! command -v llama-server >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/llama-server ]; then
+  echo "[demo] NOTE: 'llama-server' not found — install it for fast chat:"
+  echo "[demo]       brew install llama.cpp   (chat falls back to llama-cpp-python if present)"
 fi
 
 # Free the port if a previous run left a backend behind.
 pkill -f "uvicorn app:app" 2>/dev/null || true; sleep 1
 
-echo "[demo] backend on http://127.0.0.1:8000 (model via ${LLAMA_PY:-none}) …"
-( cd backend && EVA_START_LLAMA=1 EVA_LLAMA_PYTHON="$LLAMA_PY" \
+echo "[demo] backend on http://127.0.0.1:8000 (model server: llama-server) …"
+( cd backend && EVA_START_LLAMA=1 \
     exec .venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 ) &
 BACKEND_PID=$!
 

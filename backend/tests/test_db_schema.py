@@ -46,6 +46,8 @@ EXPECTED_COLUMNS = {
         "id", "level", "period_start", "period_end", "summary", "stats",
         "created_at",
     ],
+    "conversations": ["id", "started_at", "last_at", "title"],
+    "chat_turns": ["id", "conversation_id", "role", "text", "created_at"],
 }
 
 
@@ -73,7 +75,7 @@ def test_columns_exact(db, table, cols):
 def test_user_version_stamped(db):
     db_mod, conn = db
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == db_mod.SCHEMA_USER_VERSION == 2
+    assert version == db_mod.SCHEMA_USER_VERSION == 3
 
 
 def test_entries_type_check_constraint(db):
@@ -140,7 +142,8 @@ def test_v1_to_v2_migration_adds_graph_is_seeded(db):
     for table in ("graph_nodes", "graph_edges"):
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         assert "is_seeded" in cols, f"{table}.is_seeded not added by migration"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    # init_db migrates all the way forward to the current version.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db_mod.SCHEMA_USER_VERSION
 
 
 def test_init_db_idempotent(db):

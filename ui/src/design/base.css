@@ -10,10 +10,16 @@
   box-sizing: border-box;
 }
 
-html,
+/* Lock the app to the viewport: the window itself never scrolls — scrolling
+   happens inside the chat thread / content column, so the sidebar stays put. */
+html {
+  height: 100dvh;
+  overflow: hidden;
+}
 body,
 #root {
   height: 100%;
+  overflow: hidden;
 }
 
 body {

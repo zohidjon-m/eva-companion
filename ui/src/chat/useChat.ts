@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ConversationTurn } from "./api";
 
 /**
  * useChat — owns the WebSocket conversation with Eva (`WS /chat`).
@@ -109,17 +110,24 @@ export type UseChat = {
   connected: boolean;
   /** Current error banner text, or null. */
   error: string | null;
+  /** The conversation currently open (null = a fresh, unsaved thread). */
+  conversationId: string | null;
   send: (text: string) => void;
   /** Re-run the last user turn (used by the error toast's Retry). */
   retry: () => void;
   dismissError: () => void;
+  /** Replace the thread with a stored conversation's turns and continue it. */
+  openConversation: (id: string, turns: ConversationTurn[]) => void;
+  /** Start a brand-new, empty thread (the next turn creates a conversation). */
+  newConversation: () => void;
 };
 
-export function useChat(voice?: VoiceWiring): UseChat {
+export function useChat(voice?: VoiceWiring, mode: string = "friend"): UseChat {
   const [messages, setMessages] = useState<Message[]>([]);
   const [replying, setReplying] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const idSeq = useRef(0);
@@ -127,11 +135,19 @@ export function useChat(voice?: VoiceWiring): UseChat {
   const lastUserText = useRef<string | null>(null);
   const closedByUs = useRef(false);
   const reconnectTimer = useRef<number | null>(null);
+  // The conversation the socket is writing to, kept in a ref so the long-lived
+  // send/receive handlers read the latest value without being rebuilt.
+  const conversationIdRef = useRef<string | null>(null);
 
   // Hold the voice wiring in a ref so the long-lived socket handlers always see
   // the latest toggle state + callbacks without being torn down and rebuilt.
   const voiceRef = useRef<VoiceWiring | undefined>(voice);
   voiceRef.current = voice;
+
+  // The persona/mode (friend/coach/mentor), read fresh at send-time so switching
+  // it applies to the very next turn without rebuilding the socket handlers.
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
 
   const nextId = () => `m${++idSeq.current}`;
 
@@ -304,11 +320,15 @@ export function useChat(voice?: VoiceWiring): UseChat {
       ]);
       setReplying(true);
       setError(null);
+      // Tie the turn to the open conversation (if any); the backend starts a new
+      // one and echoes its id back in a "conversation" frame when this is null.
+      const convId = conversationIdRef.current ?? undefined;
+      const mode = modeRef.current;
       ws.send(
         JSON.stringify(
           capture
-            ? { text, voice: wantVoice }
-            : { text, capture: false, voice: wantVoice },
+            ? { text, voice: wantVoice, conversation_id: convId, mode }
+            : { text, capture: false, voice: wantVoice, conversation_id: convId, mode },
         ),
       );
     },
@@ -319,6 +339,15 @@ export function useChat(voice?: VoiceWiring): UseChat {
     (raw: string) => {
       const text = raw.trim();
       if (!text || streamingId.current) return;
+      // A fresh thread gets a client-generated conversation id on its first turn,
+      // sent with every frame, so the backend can persist both sides without
+      // having to echo an id back over the socket.
+      if (!conversationIdRef.current) {
+        const id =
+          globalThis.crypto?.randomUUID?.() ?? `c-${Date.now()}-${++idSeq.current}`;
+        conversationIdRef.current = id;
+        setConversationId(id);
+      }
       lastUserText.current = text;
       dispatch(text, true);
     },
@@ -338,5 +367,46 @@ export function useChat(voice?: VoiceWiring): UseChat {
 
   const dismissError = useCallback(() => setError(null), []);
 
-  return { messages, replying, connected, error, send, retry, dismissError };
+  // Replace the thread with a stored conversation's turns and make it the active
+  // one, so the next send continues it. Used by the history rail and by the
+  // initial restore-most-recent on mount.
+  const openConversation = useCallback(
+    (id: string, turns: ConversationTurn[]) => {
+      conversationIdRef.current = id;
+      streamingId.current = null;
+      lastUserText.current = null;
+      setConversationId(id);
+      setReplying(false);
+      setError(null);
+      setMessages(
+        turns.map((t) => ({ id: nextId(), role: t.role, text: t.text })),
+      );
+    },
+    [],
+  );
+
+  // Start a fresh, empty thread. The next captured turn creates a new server-side
+  // conversation and echoes its id back.
+  const newConversation = useCallback(() => {
+    conversationIdRef.current = null;
+    streamingId.current = null;
+    lastUserText.current = null;
+    setConversationId(null);
+    setReplying(false);
+    setError(null);
+    setMessages([]);
+  }, []);
+
+  return {
+    messages,
+    replying,
+    connected,
+    error,
+    conversationId,
+    send,
+    retry,
+    dismissError,
+    openConversation,
+    newConversation,
+  };
 }

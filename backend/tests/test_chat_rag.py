@@ -16,7 +16,7 @@ from app import app
 from intent import classifier as intent_classifier
 from llm import client as llm_client
 from llm import server as llm_server
-from memory import capture, retrieval
+from memory import capture, conversations, retrieval
 
 
 def _setup(monkeypatch, recorder, *, passages):
@@ -46,6 +46,13 @@ def _setup(monkeypatch, recorder, *, passages):
 
     monkeypatch.setattr(capture, "capture_entry", fake_capture)
     monkeypatch.setattr(capture, "run_extraction_and_embed", fake_extract)
+    # These tests don't isolate the vault and don't assert on chat history, so stub
+    # the transcript writers to no-ops — otherwise the /chat handler would persist
+    # conversations into the real local_vault. (Persistence is covered by
+    # test_conversations.py with an isolated vault.)
+    monkeypatch.setattr(conversations, "start_conversation", lambda *a, **k: "test-conv")
+    monkeypatch.setattr(conversations, "ensure_conversation", lambda *a, **k: None)
+    monkeypatch.setattr(conversations, "append_turn", lambda *a, **k: None)
 
     def spy_retrieve(text, **k):
         recorder.setdefault("retrieve_calls", []).append(text)
@@ -181,9 +188,9 @@ def test_recall_injects_memory_block_and_emits_chip(monkeypatch):
     # No corpus citation (vent), but the recalled memory surfaced as a chip…
     assert citations is None
     assert memories == [{"date": "2026-06-03", "label": "Jun 3"}]
-    # …and the summary was injected under the memory-context header in the prompt.
+    # …and the summary was injected under the (friend-framed) memory header.
     prompt = rec["messages"][0]["content"]
-    assert "Context from past journal entries" in prompt
+    assert "shared with you before" in prompt
     assert "the strain of moving apartments" in prompt
 
 

@@ -229,8 +229,7 @@ def main() -> int:
     _clean(vault)
 
     print("\n── seeding ─────────────────────────────────────────────────────────────")
-    _run_script("seed_demo.py")            # mood + knowledge graph (+ embed if available)
-    _run_script("seed_profile.py", "--force")  # the hand-written L3 profile
+    _run_script("seed_john.py")            # John: real journals + profile + mood + graph
     _ingest_demo_book()                    # the grounded-citation demo book
 
     print("\n── verifying ───────────────────────────────────────────────────────────")

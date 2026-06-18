@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from app import app
 from llm import client as llm_client
 from llm import server as llm_server
-from memory import capture, retrieval
+from memory import capture, conversations, retrieval
 from prompts import assembly
 
 
@@ -42,6 +42,12 @@ def _setup(monkeypatch, recorder):
 
     monkeypatch.setattr(capture, "capture_entry", fake_capture)
     monkeypatch.setattr(capture, "run_extraction_and_embed", fake_extract)
+    # These tests don't isolate the vault; stub the chat-transcript writers so the
+    # /chat handler doesn't persist conversations into the real local_vault.
+    # (Persistence is covered by test_conversations.py with an isolated vault.)
+    monkeypatch.setattr(conversations, "start_conversation", lambda *a, **k: "test-conv")
+    monkeypatch.setattr(conversations, "ensure_conversation", lambda *a, **k: None)
+    monkeypatch.setattr(conversations, "append_turn", lambda *a, **k: None)
     # Phase 11 recall is orthogonal to what these persona/history tests assert;
     # stub it off so no memory block leaks into the prompt and no memory frame
     # appears on the wire (recall has its own tests in test_retrieval.py).

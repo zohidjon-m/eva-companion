@@ -1,35 +1,43 @@
-"""Model server supervisor — launch & watch ``python -m llama_cpp.server``.
+"""Model server supervisor — launch & watch the native llama.cpp ``llama-server``.
 
 EVA_SYSTEM_DESIGN §4 makes the model server a separate process spawned and
 supervised by the backend, so that if it dies the backend can restart it without
-taking down the UI. We standardise on **llama-cpp-python's OpenAI-compatible
-server** (``python -m llama_cpp.server``) rather than the standalone
-``llama-server`` binary: it serves the identical OpenAI API on :11500, ships as a
-pip dependency (no separate binary to vendor per-OS), and is already the path the
-Phase-2 extraction pipeline was validated against.
+taking down the UI.
 
-The exact launch command mirrors ``CLAUDE.md`` (run ``python -m llama_cpp.server
---help`` to see every flag):
+The model server is the native llama.cpp **``llama-server`` binary**
+(``brew install llama.cpp``). It serves the OpenAI-compatible API on :11500, so
+:mod:`llm.client` and the rest of the backend talk to it over plain HTTP (httpx)
+and never import a model library themselves. The binary is the single supported
+launcher — there is no ``python -m llama_cpp.server`` / ``llama-cpp-python``
+fallback (it was removed: the binary is faster, starts quicker, and drops the
+dependency on finding a separate Python interpreter with the package installed).
 
-    python -m llama_cpp.server \\
+The launch command (run ``llama-server --help`` to see every flag):
+
+    llama-server \\
       --model models/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf \\
-      --n_gpu_layers -1 \\        # all layers on the Metal GPU (M1 Air)
-      --n_ctx 8192 \\             # real-time chat context budget
-      --type_k 8 --type_v 8 \\    # q8_0 KV cache — halves KV RAM on 8 GB
-      --flash_attn true \\        # required for a quantized V cache
+      --n-gpu-layers -1 \\        # all layers on the Metal GPU (M1 Air)
+      --ctx-size 8192 \\          # real-time chat context budget
+      --cache-type-k q8_0 \\      # q8_0 KV cache — halves KV RAM on 8 GB
+      --cache-type-v q8_0 \\
+      --flash-attn on \\          # required for a quantized V cache
+      --jinja \\                  # use the GGUF's embedded gemma-4 chat template
+      --reasoning off \\          # thinking OFF — stream real content tokens
       --host 127.0.0.1 --port 11500
 
-    (No ``--chat_format``: this gemma-4 GGUF ships its own correct chat template;
-    forcing the gemma-1/2 ``gemma`` handler leaks an ``<end_of_turn>`` marker.)
+    ``--jinja`` applies the GGUF's own gemma-4 chat template; we deliberately do
+    NOT pass a ``--chat_format``-style override, which would select the gemma-1/2
+    handler and leak an ``<end_of_turn>`` marker on this model.
 
 Sampling (temp / top_p / top_k / max_tokens) is **not** set here — it is chosen
 per request by :mod:`llm.client`, because chat and extraction need different
-values. ``--n_ctx`` is the server maximum; per-request budgeting is the client's
-job via ``max_tokens`` and message truncation.
+values. ``--ctx-size`` is the server maximum; per-request budgeting is the
+client's job via ``max_tokens`` and message truncation.
 
-Failure posture (CLAUDE.md rule + §9): if the GGUF is missing we never crash —
-:func:`model_status` reports ``model_present: False`` plus the download command,
-and ``/health`` surfaces it so the shell can guide first-run setup.
+Failure posture (CLAUDE.md rule + §9): if the GGUF is missing, or the
+``llama-server`` binary is not installed, we never crash — :func:`model_status`
+reports it plus the fix command, and ``/health`` surfaces it so the shell can
+guide first-run setup.
 """
 
 from __future__ import annotations
@@ -63,12 +71,14 @@ BASE_URL = f"http://{HOST}:{PORT}"
 # against a live load). So "gemma chat format" is honoured via the embedded
 # template, not the flag.
 N_CTX = 8192  # real-time chat budget; consolidation truncates client-side.
-# q8_0 KV-cache quantization (ggml type enum 8). Roughly halves KV-cache RAM,
-# which matters on the 8 GB M1 Air. A quantized V cache requires flash attention.
-KV_CACHE_TYPE = 8  # llama_cpp.GGML_TYPE_Q8_0
 
 # The first-run download is the ONLY permitted network call (CLAUDE.md rule 4).
 DOWNLOAD_CMD = "scripts/download_model_mac.sh"
+
+# Where to find the native llama.cpp server binary, in resolution order:
+# an explicit override, then PATH, then Homebrew's default location.
+LLAMA_SERVER_ENV = "EVA_LLAMA_SERVER_BIN"
+_HOMEBREW_LLAMA_SERVER = "/opt/homebrew/bin/llama-server"
 
 
 def model_present() -> bool:
@@ -83,66 +93,64 @@ def model_present() -> bool:
         return False
 
 
-def resolve_python() -> str | None:
-    """Find a Python interpreter that can ``import llama_cpp``.
+def resolve_llama_server() -> str | None:
+    """Find the native ``llama-server`` binary, or ``None`` if not installed.
 
-    The backend itself runs in a venv that need not contain ``llama-cpp-python``
-    (it is a heavy, Metal-compiled dependency). The model server is a *subprocess*,
-    so it only needs *some* interpreter on the machine with the package installed.
-    We try, in order: ``$EVA_LLAMA_PYTHON`` (explicit override), the current
-    interpreter, then a bare ``python3`` on PATH. Returns the first that has
-    ``llama_cpp``, or ``None`` if none do (reported via :func:`model_status`).
+    Tries, in order: ``$EVA_LLAMA_SERVER_BIN`` (explicit override), ``llama-server``
+    on PATH, then Homebrew's default ``/opt/homebrew/bin/llama-server``. This is the
+    only launcher; when the binary is absent the backend degrades gracefully (no
+    model server) via :func:`model_status`.
     """
-    candidates: list[str] = []
-    override = os.environ.get("EVA_LLAMA_PYTHON")
-    if override:
-        candidates.append(override)
-    candidates.append(sys.executable)
-    found = shutil.which("python3")
+    override = os.environ.get(LLAMA_SERVER_ENV)
+    if override and Path(override).is_file() and os.access(override, os.X_OK):
+        return override
+    found = shutil.which("llama-server")
     if found:
-        candidates.append(found)
-
-    seen: set[str] = set()
-    for cand in candidates:
-        if not cand or cand in seen:
-            continue
-        seen.add(cand)
-        try:
-            subprocess.run(
-                [cand, "-c", "import llama_cpp"],
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
-            return cand
-        except (subprocess.SubprocessError, OSError):
-            continue
+        return found
+    if Path(_HOMEBREW_LLAMA_SERVER).is_file() and os.access(_HOMEBREW_LLAMA_SERVER, os.X_OK):
+        return _HOMEBREW_LLAMA_SERVER
     return None
 
 
-def server_command(python: str) -> list[str]:
-    """Build the exact ``python -m llama_cpp.server`` argv (mirrors CLAUDE.md)."""
+def binary_command(binary: str) -> list[str]:
+    """Build the native ``llama-server`` argv.
+
+    Full Metal offload, 8192 context and a q8_0 KV cache. ``--jinja`` makes the
+    server apply the GGUF's embedded gemma-4 chat template for
+    ``/v1/chat/completions``; without it the binary would use a plain prompt format.
+    """
     return [
-        python,
-        "-m",
-        "llama_cpp.server",
-        "--model",
-        str(MODEL_PATH),
-        "--n_gpu_layers",
-        "-1",  # -1 = offload ALL layers to the Metal GPU.
-        "--n_ctx",
-        str(N_CTX),
-        "--type_k",
-        str(KV_CACHE_TYPE),  # q8_0 key cache
-        "--type_v",
-        str(KV_CACHE_TYPE),  # q8_0 value cache
-        "--flash_attn",
-        "true",  # mandatory once the V cache is quantized
-        "--host",
-        HOST,
-        "--port",
-        str(PORT),
+        binary,
+        "--model", str(MODEL_PATH),
+        "--n-gpu-layers", "-1",        # offload ALL layers to the Metal GPU
+        "--ctx-size", str(N_CTX),
+        "--cache-type-k", "q8_0",      # q8_0 key cache
+        "--cache-type-v", "q8_0",      # q8_0 value cache
+        "--flash-attn", "on",          # mandatory once the V cache is quantized
+        "--jinja",                     # apply the GGUF's embedded gemma-4 template
+        # Thinking OFF (project mandate). This gemma-4 build defaults to a
+        # reasoning/thinking mode that streams the thought trace as
+        # `delta.reasoning_content` and leaves `delta.content` null until the
+        # (possibly long) thinking ends — which the OpenAI-style client never
+        # surfaces, so a chat turn would appear to hang. `--reasoning off` makes
+        # the model answer directly, streaming real `content` tokens.
+        "--reasoning", "off",
+        "--host", HOST,
+        "--port", str(PORT),
     ]
+
+
+def launch_command() -> list[str] | None:
+    """Return the argv to launch the model server, or ``None`` if impossible.
+
+    Uses the native ``llama-server`` binary. ``None`` means the binary is not
+    installed — the caller surfaces that via :func:`model_status` / a graceful
+    error (the fix is ``brew install llama.cpp``).
+    """
+    binary = resolve_llama_server()
+    if binary is not None:
+        return binary_command(binary)
+    return None
 
 
 def model_status() -> dict:
@@ -153,10 +161,13 @@ def model_status() -> dict:
     command to fetch the model if it is missing (so the shell can guide setup).
     """
     present = model_present()
+    binary = resolve_llama_server()
     status: dict = {
         "model_present": present,
         "model_path": str(MODEL_PATH),
         "endpoint": BASE_URL,
+        # Which launcher the backend will use ("binary" or None).
+        "launcher": "binary" if binary else None,
     }
     if not present:
         status["hint"] = (
@@ -164,17 +175,16 @@ def model_status() -> dict:
             f"Run `{DOWNLOAD_CMD}` to download it (the only permitted network call)."
         )
         return status
-    if resolve_python() is None:
+    if status["launcher"] is None:
         status["hint"] = (
-            "Model file is present but no Python with `llama-cpp-python` was found. "
-            "Install it (`pip install 'llama-cpp-python[server]'`) or set "
-            "$EVA_LLAMA_PYTHON to an interpreter that has it."
+            "Model file is present but the `llama-server` binary was not found. "
+            "Install it with `brew install llama.cpp`."
         )
     return status
 
 
 class LlamaServer:
-    """Owns the lifecycle of the ``llama_cpp.server`` subprocess.
+    """Owns the lifecycle of the ``llama-server`` subprocess.
 
     The backend creates one of these at startup, calls :meth:`start` (which is a
     no-op that logs gracefully if the model is missing — never a crash), and
@@ -205,16 +215,19 @@ class LlamaServer:
                 DOWNLOAD_CMD,
             )
             return False
-        python = resolve_python()
-        if python is None:
+        cmd = launch_command()
+        if cmd is None:
             log.error(
-                "llama server not started: no Python with llama-cpp-python found "
-                "(set $EVA_LLAMA_PYTHON or pip install 'llama-cpp-python[server]')"
+                "llama server not started: `llama-server` binary not found "
+                "(install it with `brew install llama.cpp`)"
             )
             return False
 
-        cmd = server_command(python)
         log.info("starting model server: %s", " ".join(cmd))
+        log.info(
+            "watch the lines below for 'offloaded N/N layers to GPU' — that "
+            "confirms full Metal offload (CPU-only would be 3-5x slower)"
+        )
         self._stopping = False
         # Inherit stdout/stderr so llama.cpp's load log (incl. Metal offload
         # lines) is visible in the backend's console.
@@ -308,15 +321,14 @@ def _run_foreground() -> int:
         print(f"Model not found at {MODEL_PATH}", file=sys.stderr)
         print(f"Download it first:  {DOWNLOAD_CMD}", file=sys.stderr)
         return 1
-    python = resolve_python()
-    if python is None:
+    cmd = launch_command()
+    if cmd is None:
         print(
-            "No Python with llama-cpp-python found. Set $EVA_LLAMA_PYTHON or "
-            "pip install 'llama-cpp-python[server]'.",
+            "No `llama-server` binary found. Install it with "
+            "`brew install llama.cpp`.",
             file=sys.stderr,
         )
         return 1
-    cmd = server_command(python)
     print("exec:", " ".join(cmd), file=sys.stderr)
     os.execvp(cmd[0], cmd)  # noqa: S606 — replace process; never returns on success
     return 0  # pragma: no cover

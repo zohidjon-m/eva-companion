@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Microphone (audio-input) entitlement. Required for a hardened-runtime /
+    notarized build to be granted mic access at runtime; harmless for ad-hoc dev
+    builds. Paired with NSMicrophoneUsageDescription in Info.plist and referenced
+    from tauri.conf.json (bundle.macOS.entitlements).
+  -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>

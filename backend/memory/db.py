@@ -35,7 +35,9 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 #
 # v2 (Phase 14): added `is_seeded` to graph_nodes/graph_edges so a seeded demo
 # graph can be pruned later, mirroring the flag already on entries/mood_series.
-SCHEMA_USER_VERSION = 2
+# v3 (chat history): added `conversations` + `chat_turns` so the Chat screen can
+# persist and reopen full conversations (both sides), separate from the journal.
+SCHEMA_USER_VERSION = 3
 
 
 def db_path() -> Path:
@@ -97,6 +99,11 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
         _add_column_if_missing(conn, "graph_nodes", "is_seeded", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(conn, "graph_edges", "is_seeded", "INTEGER NOT NULL DEFAULT 0")
         log.info("migrated eva.db schema v1 → v2 (graph is_seeded)")
+    if from_version < 3:
+        # v2 → v3: chat conversation transcripts. The new tables are created by the
+        # `CREATE TABLE IF NOT EXISTS` in schema.sql that init_db() runs *before*
+        # this migration, so there is nothing to ALTER here — just record the bump.
+        log.info("migrated eva.db schema v2 → v3 (conversations + chat_turns)")
     conn.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION};")
 
 
@@ -153,6 +160,22 @@ def insert_entry(
     conn.commit()
 
 
+def update_entry_text(
+    conn: sqlite3.Connection, entry_id: str, *, text: str, word_count: int
+) -> None:
+    """Update an entry's indexed text + word_count after the L0 Markdown was edited.
+
+    Keeps the L1 index in step with the source of truth when a past entry is
+    rewritten. A no-op (zero rows) if the id isn't indexed (e.g. a hand-placed
+    entry), which is harmless — the Markdown is still the truth.
+    """
+    conn.execute(
+        "UPDATE entries SET text = ?, word_count = ? WHERE id = ?",
+        (text, word_count, entry_id),
+    )
+    conn.commit()
+
+
 def get_entry(conn: sqlite3.Connection, entry_id: str) -> sqlite3.Row | None:
     """Return the ``entries`` row for ``entry_id``, or ``None`` if absent."""
     cur = conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,))
@@ -188,6 +211,26 @@ def list_journal_days(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         WHERE e1.type = 'journal'
         GROUP BY e1.date
         ORDER BY e1.date DESC
+        """
+    ).fetchall()
+
+
+def list_journal_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return one row per *individual* journal entry, newest first.
+
+    Unlike :func:`list_journal_days`, this does not group by day — each saved
+    journal entry is its own post, so the journal surface can show a flat,
+    scrollable history (grid or list) and open any single post on its own. Each
+    row carries the entry's ``id``, ``date``, ``created_at``, full ``text`` (the
+    caller trims it to a preview) and ``word_count``. Only ``journal`` entries are
+    included; chat turns share the same day files but are not part of the journal.
+    """
+    return conn.execute(
+        """
+        SELECT id, date, created_at, text, word_count
+        FROM entries
+        WHERE type = 'journal'
+        ORDER BY created_at DESC, rowid DESC
         """
     ).fetchall()
 
@@ -502,6 +545,31 @@ def seeded_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         FROM entries e
         JOIN extractions x ON x.entry_id = e.id
         WHERE e.is_seeded = 1 AND x.extraction_status = 'done'
+        ORDER BY e.date ASC
+        """
+    ).fetchall()
+
+
+def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Like :func:`seeded_extractions` but for the user's REAL entries (is_seeded=0).
+
+    The input to the live graph build (:func:`memory.graph.store_graph`): each row
+    carries the entry id/date/text plus the extraction's themes/emotions/entities,
+    so the real graph is derived from the same data the mood chart shows.
+    """
+    return conn.execute(
+        """
+        SELECT
+            e.id        AS entry_id,
+            e.date      AS date,
+            e.text      AS text,
+            x.themes    AS themes,
+            x.emotions  AS emotions,
+            x.entities  AS entities,
+            x.summary   AS summary
+        FROM entries e
+        JOIN extractions x ON x.entry_id = e.id
+        WHERE e.is_seeded = 0 AND x.extraction_status = 'done'
         ORDER BY e.date ASC
         """
     ).fetchall()

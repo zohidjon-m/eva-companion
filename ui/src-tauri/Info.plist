@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    macOS requires a microphone usage-description string before WKWebView (the
+    Tauri webview) is even allowed to PROMPT for microphone access. Without this
+    key, navigator.mediaDevices.getUserMedia() is silently denied in the native
+    window (it works in a plain browser because the browser supplies its own).
+    Tauri merges this file into the bundled app's Info.plist on macOS.
+  -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Eva uses the microphone only to transcribe what you say into your journal, right here on your Mac. Your audio never leaves this device.</string>
+</dict>
+</plist>

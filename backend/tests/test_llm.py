@@ -49,24 +49,40 @@ def _stub_capture(monkeypatch):
 
 
 # ── server: launch command & status ─────────────────────────────────────────
-def test_server_command_has_required_flags():
-    cmd = llm_server.server_command("python3")
-    s = " ".join(cmd)
-    assert "-m llama_cpp.server" in s
-    assert cmd[0] == "python3"
-    # All layers on the Metal GPU.
-    assert "--n_gpu_layers" in cmd and cmd[cmd.index("--n_gpu_layers") + 1] == "-1"
-    # Real-time chat context budget.
-    assert cmd[cmd.index("--n_ctx") + 1] == "8192"
-    # q8_0 KV cache (ggml type 8) + the flash attention it requires.
-    assert cmd[cmd.index("--type_k") + 1] == "8"
-    assert cmd[cmd.index("--type_v") + 1] == "8"
-    assert cmd[cmd.index("--flash_attn") + 1] == "true"
-    # Port + model path.
+def test_binary_command_has_translated_flags():
+    # The preferred launcher: native llama-server with the binary's flag names.
+    cmd = llm_server.binary_command("/opt/homebrew/bin/llama-server")
+    assert cmd[0] == "/opt/homebrew/bin/llama-server"
+    assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"     # all layers on Metal
+    assert cmd[cmd.index("--ctx-size") + 1] == "8192"
+    assert cmd[cmd.index("--cache-type-k") + 1] == "q8_0"   # q8_0 KV cache
+    assert cmd[cmd.index("--cache-type-v") + 1] == "q8_0"
+    assert cmd[cmd.index("--flash-attn") + 1] == "on"       # required for q8_0 V cache
+    assert "--jinja" in cmd                                 # embedded gemma-4 template
+    assert cmd[cmd.index("--reasoning") + 1] == "off"       # thinking OFF (stream content)
     assert cmd[cmd.index("--port") + 1] == "11500"
     assert cmd[cmd.index("--model") + 1].endswith("gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf")
-    # gemma-4 ships its own template; forcing the gemma-1/2 handler leaks tokens.
     assert "--chat_format" not in cmd
+
+
+def test_resolve_and_launch_use_binary(monkeypatch, tmp_path):
+    # An explicit binary override is honored, and launch_command() builds the
+    # native llama-server argv (the only launcher).
+    fake = tmp_path / "llama-server"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("EVA_LLAMA_SERVER_BIN", str(fake))
+    assert llm_server.resolve_llama_server() == str(fake)
+    cmd = llm_server.launch_command()
+    assert cmd[0] == str(fake)
+    assert "llama_cpp.server" not in cmd
+
+
+def test_launch_command_none_without_binary(monkeypatch):
+    # No binary anywhere → no launcher (graceful; the model server stays down).
+    monkeypatch.delenv("EVA_LLAMA_SERVER_BIN", raising=False)
+    monkeypatch.setattr(llm_server, "resolve_llama_server", lambda: None)
+    assert llm_server.launch_command() is None
 
 
 def test_model_status_missing_includes_download_hint(monkeypatch):

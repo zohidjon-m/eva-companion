@@ -46,9 +46,18 @@ export function InsightsScreen() {
         ))}
       </nav>
 
-      {tab === "mood" && <MoodBlock />}
-      {tab === "graph" && <GraphView />}
-      {tab === "growth" && <GrowthView />}
+      {/* All three blocks stay mounted; we only hide the inactive ones. This keeps
+          the Connections force-layout settled instead of restarting (and "shaking")
+          every time you switch back to it, and avoids refetching on each tab flip. */}
+      <div hidden={tab !== "mood"}>
+        <MoodBlock />
+      </div>
+      <div hidden={tab !== "graph"}>
+        <GraphView />
+      </div>
+      <div hidden={tab !== "growth"}>
+        <GrowthView />
+      </div>
     </div>
   );
 }
@@ -83,15 +92,6 @@ function MoodBlock() {
               </button>
             ))}
           </div>
-
-          <label className="insights__demo">
-            <input
-              type="checkbox"
-              checked={mood.includeSeeded}
-              onChange={(e) => mood.setIncludeSeeded(e.target.checked)}
-            />
-            <span>Demo data</span>
-          </label>
         </div>
       </header>
 
@@ -115,7 +115,6 @@ function MoodBlock() {
           eyebrow="Mood"
           title="Not much to chart just yet"
           description="As you write a few more entries, the shape of your moods starts to show here — the dips, the lifts, and the quiet stretches in between."
-          footnote={mood.includeSeeded ? undefined : <>Turn on “Demo data” to preview a sample month.</>}
         />
       )}
     </section>

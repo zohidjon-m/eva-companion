@@ -131,13 +131,13 @@ def main() -> int:
         conn = db.get_or_create_db()
         empty_payload = graph.read_graph(conn, include_seeded=True)  # fresh vault → empty
 
-        # Seed believable demo data, then build + persist the seeded graph.
-        seed_path = _BACKEND.parent / "scripts" / "seed_demo.py"
+        # Seed believable demo data (John: real journals + profile + graph).
+        seed_path = _BACKEND.parent / "scripts" / "seed_john.py"
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("seed_demo", seed_path)
+        spec = importlib.util.spec_from_file_location("seed_john", seed_path)
         seed_mod = importlib.util.module_from_spec(spec)
-        sys.argv = ["seed_demo.py", "--no-embed"]
+        sys.argv = ["seed_john.py", "--no-embed"]
         spec.loader.exec_module(seed_mod)
         seed_mod.main()
         conn.close()

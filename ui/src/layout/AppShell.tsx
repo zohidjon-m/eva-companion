@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { FirstRunScreen } from "../firstrun/FirstRunScreen";
 import { NAV_ITEMS, type SectionId } from "../nav";
 import { SECTIONS } from "../sections";
 import { useHealth } from "../useHealth";
 import { useTheme } from "../useTheme";
+import { ShellProvider } from "./ShellContext";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 
@@ -25,8 +26,43 @@ import { TopBar } from "./TopBar";
 export function AppShell() {
   const [active, setActive] = useState<SectionId>("chat");
   const [exploreWithoutModel, setExploreWithoutModel] = useState(false);
+  // The sidebar can be tucked to a thin rail (just the Eva mark) to free up room
+  // for writing; pressing the mark toggles it. `spin` counts presses so the mark
+  // does a full turn in the same direction on every toggle (see Sidebar).
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [spin, setSpin] = useState(0);
+  // The chat history rail (past conversations). Pressing "Chat" while already on
+  // Chat tucks it away / brings it back — "press once to go to chats, press again
+  // and the previous chats go inside".
+  const [chatRailOpen, setChatRailOpen] = useState(true);
   const { theme, toggle } = useTheme();
   const health = useHealth();
+
+  // The Eva mark is a master "minimize": one press tucks away everything —
+  // the nav rail AND the chat history column — leaving just the thread and
+  // composer; the next press brings the whole frame back. (The "press Chat
+  // again" gesture below still toggles only the chat rail on its own.)
+  const toggleSidebar = useCallback(() => {
+    setSidebarOpen((o) => {
+      const next = !o;
+      setChatRailOpen(next);
+      return next;
+    });
+    setSpin((s) => s + 1);
+  }, []);
+
+  // Nav selection with the chat double-press gesture: selecting a different
+  // section just switches; pressing the already-active Chat tab toggles its rail.
+  const onSelect = useCallback(
+    (id: SectionId) => {
+      if (id === "chat" && active === "chat") {
+        setChatRailOpen((o) => !o);
+        return;
+      }
+      setActive(id);
+    },
+    [active],
+  );
 
   const item = NAV_ITEMS.find((n) => n.id === active)!;
   const Section = SECTIONS[active];
@@ -60,29 +96,37 @@ export function AppShell() {
   }
 
   return (
-    <div className="app">
-      <Sidebar active={active} onSelect={setActive} />
+    <ShellProvider value={{ chatRailOpen }}>
+      <div className={`app${sidebarOpen ? "" : " app--rail-collapsed"}`}>
+        <Sidebar
+          active={active}
+          onSelect={onSelect}
+          collapsed={!sidebarOpen}
+          spin={spin}
+          onToggle={toggleSidebar}
+        />
 
-      <div className="app__main">
-        <TopBar health={health} theme={theme} onToggleTheme={toggle} />
+        <div className="app__main">
+          <TopBar health={health} theme={theme} onToggleTheme={toggle} />
 
-        <main
-          className={`content${isFlush ? " content--flush" : ""}`}
-          key={active}
-        >
-          {isFlush ? (
-            <Section />
-          ) : (
-            <div className="content__inner">
-              <header className="page-head">
-                <h1 className="page-head__title">{item.label}</h1>
-                <p className="page-head__blurb">{item.blurb}</p>
-              </header>
+          <main
+            className={`content${isFlush ? " content--flush" : ""}`}
+            key={active}
+          >
+            {isFlush ? (
               <Section />
-            </div>
-          )}
-        </main>
+            ) : (
+              <div className="content__inner">
+                <header className="page-head">
+                  <h1 className="page-head__title">{item.label}</h1>
+                  <p className="page-head__blurb">{item.blurb}</p>
+                </header>
+                <Section />
+              </div>
+            )}
+          </main>
+        </div>
       </div>
-    </div>
+    </ShellProvider>
   );
 }

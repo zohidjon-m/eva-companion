@@ -103,8 +103,10 @@
 
   /* --- Layout constants -------------------------------------------------- */
   --sidebar-w: 248px;
+  --sidebar-rail-w: 64px; /* collapsed sidebar: just the Eva mark */
   --topbar-h: 60px;
   --content-max: 860px;
+  --chat-width: 48rem; /* 768px — the focused reading column for the chat thread */
 
   /* --- Motion ------------------------------------------------------------ */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -126,12 +128,16 @@
   /* Ink. */
   --text: var(--c-sand-900);
   --text-secondary: var(--c-sand-700);
-  --text-muted: var(--c-sand-500);
+  /* sand-600, not -500: clears WCAG AA 4.5:1 even on the sunken surface, while
+     staying visibly lighter than --text-secondary so the hierarchy holds. */
+  --text-muted: var(--c-sand-600);
   --text-on-accent: #ffffff;
 
-  /* Lines & separators. */
+  /* Lines & separators. ``border-strong`` outlines interactive controls (inputs,
+     secondary buttons, the persona trigger), so it's nudged up for a clearer,
+     ≥3:1-leaning edge; ``border`` stays soft for decorative separators. */
   --border: rgba(82, 71, 57, 0.14);
-  --border-strong: rgba(82, 71, 57, 0.24);
+  --border-strong: rgba(82, 71, 57, 0.34);
   --ring: rgba(68, 113, 93, 0.45); /* focus ring */
 
   /* Accent roles. */
@@ -166,11 +172,13 @@
 
   --text: #ece5d9;
   --text-secondary: #c4b9a8;
-  --text-muted: #8d8170;
+  /* Lifted from #8d8170: clears WCAG AA 4.5:1 even on the raised surface, while
+     staying below --text-secondary so muted still reads as muted. */
+  --text-muted: #a99c88;
   --text-on-accent: #14130f;
 
   --border: rgba(236, 229, 217, 0.1);
-  --border-strong: rgba(236, 229, 217, 0.18);
+  --border-strong: rgba(236, 229, 217, 0.28);
   --ring: rgba(143, 182, 160, 0.55);
 
   --accent: var(--c-moss-300);

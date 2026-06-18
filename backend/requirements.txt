@@ -19,14 +19,10 @@ pypdf>=6,<7
 pdfplumber>=0.11,<0.12
 python-multipart>=0.0.9
 
-# Phase 1 — model server. We serve Gemma over llama-cpp-python's OpenAI server
-# (`python -m llama_cpp.server`) on :11500. This is a heavy, Metal-compiled
-# build; install with the server extra:
-#     CMAKE_ARGS="-DGGML_METAL=on" pip install 'llama-cpp-python[server]'
-# backend/llm/server.py launches it as a subprocess and can use any interpreter
-# that has it (set $EVA_LLAMA_PYTHON if not this venv), so it is listed but not
-# strictly required to be in this exact environment.
-llama-cpp-python[server]>=0.3.2
+# Phase 1 — model server. Gemma is served by the native llama.cpp `llama-server`
+# binary on :11500 (install with `brew install llama.cpp`). backend/llm/server.py
+# launches and supervises it as a subprocess and talks to it over plain HTTP via
+# httpx, so no model library (llama-cpp-python) is needed in this venv.
 
 # Phase 8 — voice in (push-to-talk STT). faster-whisper runs Whisper on
 # CTranslate2 (CPU/int8 on Apple Silicon — no Metal backend). It pulls PyAV for

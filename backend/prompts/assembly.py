@@ -55,6 +55,51 @@ JOURNAL_ACK_INSTRUCTION = (
 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat modes (the UI's "Close friend / Coach / Mentor" selector). The mode rides
+# on the persona block as a short addendum — exactly like the crisis-care text —
+# so Eva's core identity and voice constraints in eva_system.md always lead and
+# are never edited; the mode only shifts *how forward-leaning* she is once she has
+# listened. "friend" is the resting state the base persona already embodies, so it
+# adds nothing. Unknown/missing values fall back to friend.
+# ─────────────────────────────────────────────────────────────────────────────
+CHAT_MODES = ("friend", "coach", "mentor")
+DEFAULT_CHAT_MODE = "friend"
+
+_MODE_ADDENDA: dict[str, str] = {
+    "friend": "",  # the base persona already IS the close friend — no shift.
+    "coach": (
+        "IMPORTANT — for this conversation the person has explicitly chosen COACH "
+        "mode, so this overrides the listen-first default: they WANT you to be "
+        "active, not just reflective. Briefly acknowledge how they feel in one "
+        "sentence, then DO end with one specific, doable next step or a small "
+        "challenge for today — even though they did not ask — because choosing "
+        "coach mode IS the ask. Be upbeat, motivating, and forward-looking; this "
+        "is the one time it is right to nudge them toward what they said they "
+        "want. Still your short, plain, spoken voice: 2–4 sentences, no lists."
+    ),
+    "mentor": (
+        "IMPORTANT — for this conversation the person has explicitly chosen MENTOR "
+        "mode, so this overrides the listen-first default: they WANT you to "
+        "challenge their thinking, not just mirror it. Acknowledge briefly, then "
+        "either name the pattern or trade-off you notice and offer a frame or "
+        "perspective to weigh, OR ask one pointed, harder question that makes them "
+        "stop and think. Speak with calm authority, like a wise older mentor — "
+        "direct and honest, never a lecture. Still your short, plain, spoken "
+        "voice: 2–4 sentences, no lists."
+    ),
+}
+
+
+def mode_addendum(mode: str | None) -> str:
+    """Return the persona addendum for a chat mode (friend/coach/mentor).
+
+    Empty for ``friend`` and for any unknown/missing value, so the resting state
+    is always the base persona exactly as written in eva_system.md.
+    """
+    return _MODE_ADDENDA.get((mode or DEFAULT_CHAT_MODE), "")
+
+
 def build_journal_ack_prompt() -> str:
     """Build the system prompt for the post-save journal acknowledgment.
 
@@ -82,10 +127,24 @@ GROUNDING_RULE = (
 # The three *context* slots, in the order they are appended after the persona.
 # Each entry is (slot_name, header_shown_to_the_model). The persona block is
 # handled separately because it is the prompt's spine, not a context section.
+# The memory/profile headers are phrased as "what a friend remembers", not as a
+# data feed, so the context informs Eva's reply instead of tipping her into a
+# report-reading register (the #7 "doesn't feel like a close friend" fix).
 _CONTEXT_SLOTS: tuple[tuple[str, str], ...] = (
-    ("memory_context", "Context from past journal entries (reference only if relevant):"),
-    ("profile_slices", "What you know about this person (from their profile):"),
+    ("memory_context", "Things they've shared with you before — bring any of it up only if it naturally fits, the way a friend remembers, never as a recap:"),
+    ("profile_slices", "What you already know about them, so you can talk like someone who actually knows them (don't list it back):"),
     ("corpus_context", f"Passages from their library. {GROUNDING_RULE}"),
+)
+
+# A short reminder appended AFTER the context slots, so the last thing the model
+# reads before replying is Eva's voice — not a block of context. Only added when
+# at least one context slot is present (a plain persona prompt needs no nudge).
+# This counters the small E2B model's tendency to drift into "summarizing the
+# notes" once context is in the window (the #7 close-friend fix).
+_CLOSING_VOICE_REMINDER = (
+    "Reply as Eva: warm, brief, two to five sentences, like a close friend who is "
+    "really listening — not an assistant and not a summary of the notes above. Let "
+    "what you know shape your reply quietly; don't recite it."
 )
 
 
@@ -121,15 +180,21 @@ def assemble_system_prompt(
         "profile_slices": profile_slices,
         "corpus_context": corpus_context,
     }
+    added_context = False
     for name, header in _CONTEXT_SLOTS:
         value = (values[name] or "").strip()
         if value:
             parts.append(f"{header}\n{value}")
+            added_context = True
+    # Close on Eva's voice when context was added, so it's the last thing read.
+    if added_context:
+        parts.append(_CLOSING_VOICE_REMINDER)
     return "\n\n".join(parts)
 
 
 def build_chat_system_prompt(
     *,
+    mode: str | None = DEFAULT_CHAT_MODE,
     persona_addendum: str = "",
     memory_context: str = "",
     profile_slices: str = "",
@@ -137,14 +202,17 @@ def build_chat_system_prompt(
 ) -> str:
     """Build the full chat system prompt for one turn.
 
-    Loads the persona, appends the optional ``persona_addendum`` (the interim
-    crisis-care text, when the message tripped the keyword scan), and assembles it
-    with whatever context slots are populated. This is the entry point the
+    Loads the persona, appends the chat-mode addendum (the UI's friend/coach/
+    mentor choice) and the optional ``persona_addendum`` (the interim crisis-care
+    text, when the message tripped the keyword scan), and assembles it with
+    whatever context slots are populated. Both addenda ride on the persona block,
+    so Eva's core identity and voice always lead. This is the entry point the
     ``/chat`` handler calls; ``assemble_system_prompt`` stays a pure function for
     easy testing.
     """
     persona = load_persona()
-    persona_block = persona if not persona_addendum else f"{persona}\n\n{persona_addendum.strip()}"
+    addenda = [a for a in (mode_addendum(mode), persona_addendum.strip()) if a]
+    persona_block = "\n\n".join([persona, *addenda]) if addenda else persona
     return assemble_system_prompt(
         persona_block=persona_block,
         memory_context=memory_context,

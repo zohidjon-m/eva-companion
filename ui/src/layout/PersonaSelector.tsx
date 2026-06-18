@@ -1,29 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../components";
+import { PERSONAS, usePersona } from "./PersonaContext";
 
 /**
  * PersonaSelector — choose how Eva shows up: a close friend, a coach, or a
- * mentor. Visual only in Phase 3; the choice is held in local state and not yet
- * sent to the backend. The persona system (Group D) wires this up in a later
- * phase, at which point this component just gains an onChange that calls the API.
+ * mentor. The choice lives in PersonaContext (persisted), and the chat send
+ * includes it as `mode` on every turn, so it actually changes Eva's replies.
+ *
+ * The open menu marks the current choice with a check (not a heavy filled block),
+ * so a selected option never looks like a stuck highlight behind its text.
  */
-
-type Persona = {
-  id: string;
-  name: string;
-  hint: string;
-};
-
-const PERSONAS: Persona[] = [
-  { id: "friend", name: "Close friend", hint: "Warm, casual, listens first." },
-  { id: "coach", name: "Coach", hint: "Encouraging, nudges you forward." },
-  { id: "mentor", name: "Mentor", hint: "Measured, asks the hard question." },
-];
-
 export function PersonaSelector() {
+  const { persona, setPersona } = usePersona();
   const [open, setOpen] = useState(false);
-  const [selected, setSelected] = useState(PERSONAS[0]);
   const root = useRef<HTMLDivElement>(null);
+
+  const selected = PERSONAS.find((p) => p.id === persona) ?? PERSONAS[0];
 
   // Close on outside-click and on Escape — basic menu hygiene.
   useEffect(() => {
@@ -57,25 +49,37 @@ export function PersonaSelector() {
 
       {open && (
         <ul className="persona__menu" role="listbox" aria-label="Eva's persona">
-          {PERSONAS.map((p) => (
-            <li key={p.id}>
-              <button
-                role="option"
-                aria-selected={p.id === selected.id}
-                className={
-                  "persona__option" +
-                  (p.id === selected.id ? " persona__option--active" : "")
-                }
-                onClick={() => {
-                  setSelected(p);
-                  setOpen(false);
-                }}
-              >
-                <span className="persona__option-name">{p.name}</span>
-                <span className="persona__option-hint">{p.hint}</span>
-              </button>
-            </li>
-          ))}
+          {PERSONAS.map((p) => {
+            const isCurrent = p.id === persona;
+            return (
+              <li key={p.id}>
+                <button
+                  role="option"
+                  aria-selected={isCurrent}
+                  className={
+                    "persona__option" +
+                    (isCurrent ? " persona__option--current" : "")
+                  }
+                  onClick={() => {
+                    setPersona(p.id);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="persona__option-text">
+                    <span className="persona__option-name">{p.name}</span>
+                    <span className="persona__option-hint">{p.hint}</span>
+                  </span>
+                  {isCurrent && (
+                    <Icon
+                      name="check"
+                      size={16}
+                      className="persona__option-check"
+                    />
+                  )}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

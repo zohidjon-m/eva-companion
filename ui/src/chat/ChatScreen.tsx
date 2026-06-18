@@ -1,15 +1,25 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { Icon } from "../components";
+import { usePersona } from "../layout/PersonaContext";
+import { useShell } from "../layout/ShellContext";
 import { MicButton } from "../voice/MicButton";
 import { appendTranscript } from "../voice/text";
 import { useVoice } from "../voice/VoiceContext";
-import { useChat, type Citation, type Memory, type Message } from "./useChat";
+import {
+  deleteConversation,
+  fetchConversation,
+  fetchConversations,
+  type ConversationSummary,
+} from "./api";
+import { useChat, type Citation, type Message } from "./useChat";
 
 /**
  * ChatScreen — the Phase 4 chat surface, wired to `WS /chat` via useChat.
@@ -22,18 +32,138 @@ import { useChat, type Citation, type Memory, type Message } from "./useChat";
  * and the input is disabled while Eva is replying.
  */
 
+// The history rail is user-resizable so long conversation titles can be read in
+// full. Width is clamped and remembered between visits.
+const RAIL_MIN = 200;
+const RAIL_MAX = 460;
+const RAIL_DEFAULT = 248;
+const RAIL_KEY = "eva.chatRailWidth";
+
+function loadRailWidth(): number {
+  const v = Number(localStorage.getItem(RAIL_KEY));
+  return Number.isFinite(v) && v >= RAIL_MIN && v <= RAIL_MAX ? v : RAIL_DEFAULT;
+}
+
 export function ChatScreen() {
+  // Whether the past-conversations rail is shown — toggled by pressing "Chat"
+  // again in the sidebar (lifted to the shell, read here via context).
+  const { chatRailOpen } = useShell();
+  // The chosen persona (friend/coach/mentor) — sent as `mode` on every turn.
+  const { persona } = usePersona();
+
   // Bridge the shared voice state into the chat socket: the per-turn `voice` flag
   // comes from the top-bar toggle, and Eva's synthesized audio is routed to the
   // playback queue. enqueue/stop/reportUnavailable are stable callbacks.
   const voice = useVoice();
-  const { messages, replying, connected, error, send, retry, dismissError } =
-    useChat({
+  const {
+    messages,
+    replying,
+    connected,
+    error,
+    conversationId,
+    send,
+    retry,
+    dismissError,
+    openConversation,
+    newConversation,
+  } = useChat(
+    {
       enabled: voice.enabled,
       onAudio: voice.enqueue,
       onVoiceUnavailable: voice.reportUnavailable,
       onTurnStart: voice.stop,
-    });
+    },
+    persona,
+  );
+
+  // The history rail: the list of past conversations, kept in sync with the
+  // backend. Loaded on mount and refreshed whenever the thread goes idle (a turn
+  // finished) or the active conversation changes.
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const didRestore = useRef(false);
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations(await fetchConversations());
+    } catch {
+      // Best-effort: a backend hiccup leaves the prior list rather than blanking.
+    }
+  }, []);
+
+  // Restore the most recent conversation once on mount, so a reload or a tab
+  // switch back to Chat brings the last thread back instead of an empty screen.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await fetchConversations();
+        if (cancelled) return;
+        setConversations(list);
+        if (!didRestore.current && list.length > 0) {
+          didRestore.current = true;
+          const convo = await fetchConversation(list[0].id);
+          if (!cancelled && convo) openConversation(convo.id, convo.turns);
+        }
+      } catch {
+        /* offline: start with an empty thread */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [openConversation]);
+
+  // Keep the rail fresh as turns complete (new conversation appears, ordering
+  // updates) — only when idle so we don't refetch mid-stream.
+  useEffect(() => {
+    if (!replying) void refreshConversations();
+  }, [replying, conversationId, refreshConversations]);
+
+  const onOpen = useCallback(
+    async (id: string) => {
+      if (id === conversationId) return;
+      const convo = await fetchConversation(id);
+      if (convo) openConversation(convo.id, convo.turns);
+    },
+    [conversationId, openConversation],
+  );
+
+  const onDelete = useCallback(
+    async (id: string) => {
+      await deleteConversation(id);
+      if (id === conversationId) newConversation();
+      void refreshConversations();
+    },
+    [conversationId, newConversation, refreshConversations],
+  );
+
+  // Rail resize: drag the divider to set the rail width. We measure from the
+  // layout's left edge so the width tracks the cursor exactly, and suppress the
+  // width transition while dragging so it follows the pointer without lag.
+  const layoutRef = useRef<HTMLDivElement>(null);
+  const [railWidth, setRailWidth] = useState(loadRailWidth);
+  const [resizing, setResizing] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem(RAIL_KEY, String(railWidth));
+  }, [railWidth]);
+
+  const startResize = useCallback((e: ReactPointerEvent) => {
+    e.preventDefault();
+    const left = layoutRef.current?.getBoundingClientRect().left ?? 0;
+    setResizing(true);
+    const onMove = (ev: PointerEvent) => {
+      const w = Math.min(RAIL_MAX, Math.max(RAIL_MIN, ev.clientX - left));
+      setRailWidth(w);
+    };
+    const onUp = () => {
+      setResizing(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, []);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether the view is pinned to the bottom (so streaming keeps it there).
@@ -55,31 +185,126 @@ export function ChatScreen() {
   }, [messages]);
 
   return (
-    <div className="chat">
-      <div
-        className="chat__scroll"
-        ref={scrollRef}
-        onScroll={updatePinned}
-      >
-        <div className="chat__thread">
-          {messages.length === 0 ? (
-            <ChatGreeting />
-          ) : (
-            messages.map((m) => <Bubble key={m.id} message={m} />)
-          )}
-        </div>
-      </div>
-
-      {error && (
-        <Toast
-          message={error}
-          onRetry={retry}
-          onDismiss={dismissError}
+    <div
+      className={`chat-layout${resizing ? " chat-layout--resizing" : ""}`}
+      ref={layoutRef}
+    >
+      <ConversationRail
+        conversations={conversations}
+        activeId={conversationId}
+        onNew={newConversation}
+        onOpen={onOpen}
+        onDelete={onDelete}
+        open={chatRailOpen}
+        width={railWidth}
+      />
+      {chatRailOpen && (
+        <div
+          className="chat-rail-resizer"
+          onPointerDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize conversation list"
         />
       )}
+      <div className="chat">
+        <div
+          className="chat__scroll"
+          ref={scrollRef}
+          onScroll={updatePinned}
+        >
+          <div className="chat__thread">
+            {messages.length === 0 ? (
+              <ChatGreeting />
+            ) : (
+              messages.map((m) => <Turn key={m.id} message={m} />)
+            )}
+          </div>
+        </div>
 
-      <Composer onSend={send} disabled={replying} connected={connected} />
+        {error && (
+          <Toast
+            message={error}
+            onRetry={retry}
+            onDismiss={dismissError}
+          />
+        )}
+
+        <Composer onSend={send} disabled={replying} connected={connected} />
+      </div>
     </div>
+  );
+}
+
+/**
+ * ConversationRail — the chat history sidebar. Lists past conversations newest
+ * first, highlights the open one, and offers a "New chat" affordance. Clicking a
+ * row reopens that conversation (both sides); the small ✕ deletes it. The rail
+ * scrolls independently of the thread, so a long history never moves the chat.
+ *
+ * It can be tucked away (pressing "Chat" again in the sidebar) — it animates to
+ * zero width rather than vanishing — and dragged wider via the divider so long
+ * titles can be read in full; `width` is the user's chosen size.
+ */
+function ConversationRail({
+  conversations,
+  activeId,
+  onNew,
+  onOpen,
+  onDelete,
+  open,
+  width,
+}: {
+  conversations: ConversationSummary[];
+  activeId: string | null;
+  onNew: () => void;
+  onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
+  open: boolean;
+  width: number;
+}) {
+  return (
+    <aside
+      className={`convo-rail${open ? "" : " convo-rail--closed"}`}
+      style={{ width: open ? width : 0 }}
+      aria-label="Conversation history"
+      aria-hidden={!open}
+    >
+      <button className="convo-rail__new" onClick={onNew}>
+        <Icon name="feather" size={16} />
+        New chat
+      </button>
+      <div className="convo-rail__list">
+        {conversations.length === 0 ? (
+          <p className="convo-rail__empty">Your conversations will appear here.</p>
+        ) : (
+          conversations.map((c) => (
+            <div
+              key={c.id}
+              className={`convo-item${c.id === activeId ? " convo-item--active" : ""}`}
+            >
+              <button
+                className="convo-item__open"
+                onClick={() => onOpen(c.id)}
+                title={c.title ?? "Conversation"}
+              >
+                <span className="convo-item__title">
+                  {c.title?.trim() || "New conversation"}
+                </span>
+              </button>
+              <button
+                className="convo-item__del"
+                onClick={() => onDelete(c.id)}
+                aria-label="Delete conversation"
+                title="Delete"
+              >
+                <Icon name="trash" size={14} />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -99,24 +324,29 @@ function ChatGreeting() {
   );
 }
 
-/** One message row — Eva left, user right. Eva shows typing dots until tokens land. */
-function Bubble({ message }: { message: Message }) {
+/**
+ * One conversation turn, in the modern assistant-chat layout (Claude/ChatGPT/
+ * Gemini style): Eva's replies are full-width plain text with a small avatar and
+ * name; the user's turns are a compact, right-aligned soft block. Eva shows the
+ * typing dots until her first token lands, then a blinking caret while streaming.
+ */
+function Turn({ message }: { message: Message }) {
   const { role, text, streaming, failed, citations, memories } = message;
   const isEva = role === "eva";
   const waiting = isEva && streaming && text === "";
 
   return (
-    <div className={`msg msg--${role}`}>
-      <div className="msg__content">
-        {isEva && memories && memories.length > 0 && (
-          <Memories memories={memories} />
-        )}
+    <div className={`turn turn--${role}`}>
+      {isEva && (
+        <div className="turn__avatar" aria-hidden="true">
+          <Icon name="sparkle" size={16} />
+        </div>
+      )}
+      <div className="turn__col">
+        {isEva && <span className="turn__name">Eva</span>}
+        {isEva && memories && memories.length > 0 && <Memories />}
         <div
-          className={[
-            "bubble",
-            `bubble--${role}`,
-            failed ? "bubble--failed" : "",
-          ]
+          className={["turn__body", failed ? "turn__body--failed" : ""]
             .filter(Boolean)
             .join(" ")}
         >
@@ -125,7 +355,7 @@ function Bubble({ message }: { message: Message }) {
           ) : (
             <>
               {text}
-              {isEva && streaming && <span className="bubble__cursor" />}
+              {isEva && streaming && <span className="turn__cursor" />}
             </>
           )}
         </div>
@@ -138,26 +368,21 @@ function Bubble({ message }: { message: Message }) {
 }
 
 /**
- * The "Eva remembers" cue (Phase 11) — a subtle line above her reply naming the
- * past day(s) she recalled for this turn. It sits ABOVE the bubble (citations sit
- * below) so the demo audience reads "remembering Jun 3" as Eva reaches back, just
- * before she answers. Chips are non-interactive on purpose: this is a quiet "she
- * remembered", not a doorway into the entry — re-reading lives in Journal browse.
- * Chips only ever render from memories the backend sent, each gated by relevance,
- * so a chip can never name a day Eva didn't genuinely recall.
+ * The "Eva remembers" cue (Phase 11) — a subtle line above her reply that signals
+ * she reached back into past entries for this turn. It sits ABOVE the bubble
+ * (citations sit below) so the reader sees "Remembering" as Eva reaches back, just
+ * before she answers. It only ever renders when the backend actually sent recalled
+ * memories for the turn, so the cue can never claim a recall that didn't happen.
+ *
+ * It deliberately shows no dates: which specific days Eva recalled is noise in the
+ * chat flow, and re-reading lives in Journal browse — this is just the quiet
+ * "she remembered" signal, not a doorway into the entries.
  */
-function Memories({ memories }: { memories: Memory[] }) {
+function Memories() {
   return (
     <div className="remember">
       <Icon name="sparkle" size={13} className="remember__mark" />
       <span className="remember__label">Remembering</span>
-      <span className="remember__chips">
-        {memories.map((m) => (
-          <span key={m.date} className="remember__chip">
-            {m.label}
-          </span>
-        ))}
-      </span>
     </div>
   );
 }

@@ -3,39 +3,51 @@ Hardware target: MacBook M1 Air 8 GB RAM (Apple Silicon; Metal GPU offload
 via --n_gpu_layers -1). Voice models (faster-whisper, Kokoro) are lazy-loaded
 on first use — never at startup — to stay within the 8 GB memory budget.
 Stack: Tauri (Rust shell) + React/Vite frontend + Python FastAPI backend +
-llama-cpp-python OpenAI server (python -m llama_cpp.server) running
-gemma-4-E2B-it-qat (Q4_K_XL GGUF) on port 11500, all layers on Metal GPU +
+native llama.cpp `llama-server` binary running gemma-4-E2B-it-qat (Q4_K_XL GGUF)
+on port 11500, all layers on Metal GPU +
 ChromaDB + SQLite + faster-whisper + Kokoro TTS.
 English only.
 
-Model server command (verified against `python -m llama_cpp.server --help`):
-python -m llama_cpp.server \
+Model server: the native llama.cpp `llama-server` binary is the ONLY launcher.
+There is no `python -m llama_cpp.server` / llama-cpp-python fallback — it was
+removed. Install the binary with `brew install llama.cpp`.
+
+Model server command (run `llama-server --help` to see every flag):
+llama-server \
  --model models/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf \
- --n_gpu_layers -1 \
- --n_ctx 8192 \
- --type_k 8 --type_v 8 \
- --flash_attn true \
+ --n-gpu-layers -1 \
+ --ctx-size 8192 \
+ --cache-type-k q8_0 --cache-type-v q8_0 \
+ --flash-attn on \
+ --jinja \
+ --reasoning off \
  --host 127.0.0.1 \
  --port 11500
 
 Flag notes (don't guess these — they were checked with --help and a live load):
- gemma chat format   : this is a gemma-4 GGUF; it ships its own correct gemma-4
-                       chat template, which llama_cpp uses automatically. Do NOT
-                       pass `--chat_format gemma` — that selects the gemma-1/2
-                       handler and leaks a literal `<end_of_turn>` token into
-                       replies. (Verified live.)
- --n_gpu_layers -1   : offload ALL layers to the Metal GPU (logs must show
+ --jinja             : apply the GGUF's embedded gemma-4 chat template. This is a
+                       gemma-4 GGUF with its own correct template; do NOT pass a
+                       `--chat-format`-style override (the gemma-1/2 handler leaks
+                       a literal `<end_of_turn>` token into replies). (Verified live.)
+ --reasoning off     : this gemma-4 build defaults to a thinking mode that streams
+                       the thought trace as `reasoning_content` and leaves
+                       `content` null until thinking ends; the OpenAI-style client
+                       never surfaces that, so a turn would appear to hang. `off`
+                       makes it answer directly with real content tokens.
+ --n-gpu-layers -1   : offload ALL layers to the Metal GPU (logs must show
                        "offloaded N/N layers to GPU"; CPU-only is 3–5× slower).
- --type_k 8 --type_v 8 : q8_0 KV cache (ggml type 8). Halves KV-cache RAM, which
+ --cache-type-k q8_0 --cache-type-v q8_0 : q8_0 KV cache. Halves KV-cache RAM, which
                        matters on the 8 GB M1 Air. A quantized V cache REQUIRES
-                       flash attention, hence --flash_attn true.
- --n_ctx 8192        : real-time chat context budget (server maximum). Never
+                       flash attention, hence --flash-attn on.
+ --ctx-size 8192     : real-time chat context budget (server maximum). Never
                        lower it for per-request limiting — the client does that
                        with max_tokens / message truncation.
 
 The model server is launched & supervised by the backend (backend/llm/server.py),
-not started by hand in normal use. It needs an interpreter with `llama-cpp-python`
-installed; set $EVA_LLAMA_PYTHON if that isn't the backend's own venv.
+not started by hand in normal use. The backend finds the binary on PATH or at
+/opt/homebrew/bin/llama-server (override with $EVA_LLAMA_SERVER_BIN). Set
+EVA_START_LLAMA=1 so the backend launches it on startup. The backend's own venv
+does NOT need llama-cpp-python — it talks to the server over plain HTTP.
 
 Sampling is set per request by the client (backend/llm/client.py), not on the
 server: chat uses temp 1.0 / top_p 0.95 / top_k 64; extraction uses temp 0.3.
