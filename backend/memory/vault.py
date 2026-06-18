@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import threading
 import uuid
 from dataclasses import dataclass
@@ -142,6 +143,75 @@ def save_entry(text: str, entry_type: str, *, when: datetime | None = None) -> E
 
     log.info("vault: saved %s turn %s to %s", entry_type, rec.id, path.name)
     return rec
+
+
+def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
+    """Rewrite the body of an existing turn in its day file. Returns the updated
+    record, or ``None`` if no turn with that id is found on disk.
+
+    This is the single, deliberate exception to the append-only rule (editable
+    past entries). The crash-safety that rule gave us is preserved two ways: the
+    whole day file is copied to ``<file>.bak`` before the rewrite, and the new
+    content is written to a temp file then atomically swapped in. Only the matched
+    turn's body changes — the frontmatter, the day heading, and every other turn
+    in the file are kept byte-for-byte.
+    """
+    if not new_text or not new_text.strip():
+        raise ValueError("refusing to save an empty entry")
+    body = new_text.strip()
+
+    with _write_lock:
+        for date in list_day_dates():
+            path = day_file(date)
+            lines = path.read_text(encoding="utf-8").split("\n")
+            out: list[str] = []
+            i, n = 0, len(lines)
+            cur_time: str | None = None
+            cur_type: str | None = None
+            hit_time: str | None = None
+            hit_type: str | None = None
+            found = False
+
+            while i < n:
+                line = lines[i]
+                header = _TURN_HEADER_RE.match(line)
+                if header:
+                    cur_time, cur_type = header.group(1), header.group(2).strip()
+                out.append(line)
+                id_match = _ID_RE.match(line.strip())
+                if id_match and id_match.group(1).strip() == entry_id:
+                    found = True
+                    hit_time, hit_type = cur_time, cur_type
+                    # Skip the original body up to the next turn header (or EOF),
+                    # then write the new body framed by single blank lines so the
+                    # section spacing matches what `_turn_block` originally wrote.
+                    i += 1
+                    while i < n and not _TURN_HEADER_RE.match(lines[i]):
+                        i += 1
+                    out.append("")
+                    out.extend(body.split("\n"))
+                    out.append("")
+                    continue
+                i += 1
+
+            if found:
+                backup = path.with_suffix(path.suffix + ".bak")
+                shutil.copy2(path, backup)
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text("\n".join(out), encoding="utf-8")
+                tmp.replace(path)
+                rec = EntryRecord(
+                    id=entry_id,
+                    date=date,
+                    type=hit_type or "journal",
+                    text=body,
+                    word_count=len(body.split()),
+                    created_at=f"{date}T{hit_time or '00:00:00'}",
+                )
+                log.info("vault: updated %s turn %s in %s (backup %s)",
+                         rec.type, entry_id, path.name, backup.name)
+                return rec
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -14,9 +14,9 @@ import type { GraphEdge, GraphNode } from "./graphApi";
  * each open and never jitters on re-render.
  */
 
-export const VB_W = 640;
-export const VB_H = 460;
-const PAD = 28; // keep nodes off the very edge so labels stay readable
+export const VB_W = 820;
+export const VB_H = 600;
+const PAD = 32; // keep nodes off the very edge so labels stay readable
 
 type Sim = { x: number; y: number; pinned: boolean };
 
@@ -69,7 +69,9 @@ export function useGraphLayout(nodes: GraphNode[], edges: GraphEdge[]): GraphLay
         node.pinned = true;
         node.x = Math.max(PAD, Math.min(VB_W - PAD, loc.x));
         node.y = Math.max(PAD, Math.min(VB_H - PAD, loc.y));
-        temp.current = Math.max(temp.current, VB_W * 0.04); // reheat so neighbours adjust
+        // Keep the rest of the graph still while dragging: only a whisper of heat
+        // so neighbours ease (not lurch) toward the moved node, never shake.
+        temp.current = Math.max(temp.current, 6);
         restart.current(); // resume the sim if it had cooled to a stop
         setTick((t) => t + 1);
       };

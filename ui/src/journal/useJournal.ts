@@ -8,26 +8,33 @@ import {
 } from "react";
 import {
   fetchAck,
-  fetchDay,
-  fetchDays,
+  fetchEntries,
+  fetchEntry,
   saveJournal,
-  type DayEntry,
-  type JournalDay,
+  toDisplayMarkdown,
+  toStorageMarkdown,
+  updateJournal,
+  type JournalEntry,
+  type JournalEntryFull,
 } from "./api";
 
 /**
  * useJournal — all the state behind the journaling surface, kept here so the
  * screen stays presentational.
  *
- * It owns four things:
- *   - the today's-entry draft, autosaved to localStorage every ~10s so a closed
- *     app never loses an unfinished entry
+ * Journaling is a stream of discrete posts, not one continuous daily page: every
+ * Save creates its own entry, and the surface opens on a flat history of those
+ * posts (newest first) with an explicit "New entry" action. This hook owns:
+ *   - the compose draft, autosaved to localStorage every ~10s so a closed app
+ *     never loses an unfinished entry
  *   - the explicit Save → capture → ask-Eva flow
- *   - the browse list of past days and the today's saved entries
- *   - which view is showing: the writer (today) or a read-only past day
+ *   - the flat history list of past posts and one opened post's full text
+ *   - which view is showing (history index / compose / a single entry) and the
+ *     remembered grid-vs-list layout for the index
  */
 
 const DRAFT_KEY = "eva.journal.draft";
+const LAYOUT_KEY = "eva.journal.layout";
 const AUTOSAVE_MS = 10_000;
 
 /** Local calendar date as YYYY-MM-DD (matches how the backend stamps days). */
@@ -44,8 +51,14 @@ export type AckState =
   | { kind: "line"; text: string } // Eva offered a reflection
   | { kind: "saved" }; // saved, but no line (model offline / failed)
 
-/** Which pane the main area is showing. */
-export type JournalView = { kind: "write" } | { kind: "day"; date: string };
+/** How the history index lays out posts. */
+export type JournalLayout = "grid" | "list";
+
+/** Which pane the surface is showing. */
+export type JournalView =
+  | { kind: "index" } // the flat history of posts (the landing view)
+  | { kind: "compose" } // writing a new post
+  | { kind: "entry"; id: string }; // reading one past post
 
 export type UseJournal = {
   today: string;
@@ -58,15 +71,28 @@ export type UseJournal = {
   saving: boolean;
   saveError: string | null;
   ack: AckState;
-  days: JournalDay[];
-  /** Entries already saved earlier today (shown above the editor). */
-  todayEntries: DayEntry[];
+  /** The flat history of individual journal posts, newest first. */
+  entries: JournalEntry[];
+  loadingEntries: boolean;
   view: JournalView;
-  dayEntries: DayEntry[];
-  dayLoading: boolean;
+  /** The full text of the currently-open post (null while loading / not found). */
+  entryDetail: JournalEntryFull | null;
+  entryLoading: boolean;
+  layout: JournalLayout;
+  setLayout: (layout: JournalLayout) => void;
   save: () => void;
-  openDay: (date: string) => void;
-  openWrite: () => void;
+  openIndex: () => void;
+  openCompose: () => void;
+  openEntry: (id: string) => void;
+  /** --- Editing an existing post --- */
+  editing: boolean;
+  editDraft: string;
+  setEditDraft: Dispatch<SetStateAction<string>>;
+  savingEdit: boolean;
+  editError: string | null;
+  startEdit: () => void;
+  cancelEdit: () => void;
+  saveEdit: () => void;
 };
 
 export function useJournal(): UseJournal {
@@ -80,32 +106,44 @@ export function useJournal(): UseJournal {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [ack, setAck] = useState<AckState>({ kind: "idle" });
 
-  const [days, setDays] = useState<JournalDay[]>([]);
-  const [todayEntries, setTodayEntries] = useState<DayEntry[]>([]);
+  const [entries, setEntries] = useState<JournalEntry[]>([]);
+  const [loadingEntries, setLoadingEntries] = useState(true);
 
-  const [view, setView] = useState<JournalView>({ kind: "write" });
-  const [dayEntries, setDayEntries] = useState<DayEntry[]>([]);
-  const [dayLoading, setDayLoading] = useState(false);
+  const [view, setView] = useState<JournalView>({ kind: "index" });
+  const [entryDetail, setEntryDetail] = useState<JournalEntryFull | null>(null);
+  const [entryLoading, setEntryLoading] = useState(false);
+
+  // Editing an already-saved post. `editing` flips the entry view's reader into
+  // an editable editor seeded with the post's current text (in display form).
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const [layout, setLayoutState] = useState<JournalLayout>(() =>
+    localStorage.getItem(LAYOUT_KEY) === "list" ? "list" : "grid",
+  );
+  const setLayout = useCallback((next: JournalLayout) => {
+    setLayoutState(next);
+    localStorage.setItem(LAYOUT_KEY, next);
+  }, []);
 
   // The latest draft, readable from interval/unmount callbacks without making
   // them depend on (and re-bind to) every keystroke.
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
-  // Pull the browse list and today's already-saved entries. Best-effort: if the
-  // backend isn't up yet, leave what we have rather than blanking the screen.
+  // Pull the flat history of posts. Best-effort: if the backend isn't up yet,
+  // leave what we have rather than blanking the screen.
   const refresh = useCallback(async () => {
     try {
-      setDays(await fetchDays());
+      setEntries(await fetchEntries());
     } catch {
       /* offline — keep prior list */
+    } finally {
+      setLoadingEntries(false);
     }
-    try {
-      setTodayEntries(await fetchDay(today));
-    } catch {
-      setTodayEntries([]);
-    }
-  }, [today]);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -133,6 +171,19 @@ export function useJournal(): UseJournal {
     };
   }, []);
 
+  // Load one post's full text for the read-only entry view.
+  const loadEntry = useCallback(async (id: string) => {
+    setEntryLoading(true);
+    setEntryDetail(null);
+    try {
+      setEntryDetail(await fetchEntry(id));
+    } catch {
+      setEntryDetail(null);
+    } finally {
+      setEntryLoading(false);
+    }
+  }, []);
+
   const save = useCallback(async () => {
     const text = draftRef.current.trim();
     if (!text || saving) return;
@@ -140,12 +191,17 @@ export function useJournal(): UseJournal {
     setSaveError(null);
     setAck({ kind: "idle" });
     try {
-      const { id } = await saveJournal(text);
-      // Durable now: clear the editor + draft and surface the saved entry.
+      // The editor works in display form (absolute image URLs); the L0 file
+      // stores vault-relative paths, so the Markdown stays portable.
+      const { id } = await saveJournal(toStorageMarkdown(text));
+      // Durable now: clear the editor + draft, refresh the history, and open the
+      // post we just wrote so Eva's reflection lands on it.
       setDraft("");
       localStorage.removeItem(DRAFT_KEY);
       setDraftSavedAt(null);
       await refresh();
+      setView({ kind: "entry", id });
+      loadEntry(id);
       // Then ask Eva for her one gentle line (non-blocking on the save).
       setAck({ kind: "loading" });
       try {
@@ -160,29 +216,64 @@ export function useJournal(): UseJournal {
     } finally {
       setSaving(false);
     }
-  }, [saving, refresh]);
+  }, [saving, refresh, loadEntry]);
 
-  const openDay = useCallback(
-    async (date: string) => {
-      if (date === today) {
-        setView({ kind: "write" });
-        return;
-      }
-      setView({ kind: "day", date });
-      setDayLoading(true);
-      setDayEntries([]);
-      try {
-        setDayEntries(await fetchDay(date));
-      } catch {
-        setDayEntries([]);
-      } finally {
-        setDayLoading(false);
-      }
+  const openIndex = useCallback(() => {
+    setAck({ kind: "idle" });
+    setEditing(false);
+    setView({ kind: "index" });
+  }, []);
+
+  const openCompose = useCallback(() => {
+    setAck({ kind: "idle" });
+    setSaveError(null);
+    setEditing(false);
+    setView({ kind: "compose" });
+  }, []);
+
+  const openEntry = useCallback(
+    (id: string) => {
+      setAck({ kind: "idle" });
+      setEditing(false);
+      setView({ kind: "entry", id });
+      loadEntry(id);
     },
-    [today],
+    [loadEntry],
   );
 
-  const openWrite = useCallback(() => setView({ kind: "write" }), []);
+  // Enter edit mode on the open post: seed the editor with its current text in
+  // display form (absolute image URLs), so editing reuses the same editor as
+  // compose.
+  const startEdit = useCallback(() => {
+    if (!entryDetail) return;
+    setEditError(null);
+    setEditDraft(toDisplayMarkdown(entryDetail.text));
+    setEditing(true);
+  }, [entryDetail]);
+
+  const cancelEdit = useCallback(() => {
+    setEditError(null);
+    setEditing(false);
+  }, []);
+
+  const saveEdit = useCallback(async () => {
+    const text = editDraft.trim();
+    if (!entryDetail || !text || savingEdit) return;
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      // Same display→storage shrink as a new save, so edited image URLs stay
+      // vault-relative in the L0 source of truth.
+      const updated = await updateJournal(entryDetail.id, toStorageMarkdown(text));
+      setEntryDetail(updated);
+      setEditing(false);
+      await refresh(); // word counts / previews in the index reflect the edit
+    } catch {
+      setEditError("Couldn't save your changes just now. They're still here — try again.");
+    } finally {
+      setSavingEdit(false);
+    }
+  }, [editDraft, entryDetail, savingEdit, refresh]);
 
   return {
     today,
@@ -192,13 +283,24 @@ export function useJournal(): UseJournal {
     saving,
     saveError,
     ack,
-    days,
-    todayEntries,
+    entries,
+    loadingEntries,
     view,
-    dayEntries,
-    dayLoading,
+    entryDetail,
+    entryLoading,
+    layout,
+    setLayout,
     save,
-    openDay,
-    openWrite,
+    openIndex,
+    openCompose,
+    openEntry,
+    editing,
+    editDraft,
+    setEditDraft,
+    savingEdit,
+    editError,
+    startEdit,
+    cancelEdit,
+    saveEdit,
   };
 }

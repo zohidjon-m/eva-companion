@@ -19,7 +19,10 @@ import json
 import logging
 import os
 import re
+import threading
+import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import (
     BackgroundTasks,
@@ -32,6 +35,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 # Install the network guard at import time, before any networking library can
@@ -41,7 +45,7 @@ from net_guard import allow_summary, install_net_guard, is_installed
 # Phase 2 capture pipeline (vault + L1 index + background extraction/embedding).
 # Phase 5 also reads the L1 index (db) and the L0 day files (vault) directly for
 # the journal browse / read-only day view.
-from memory import capture, db, vault, vault_dir
+from memory import capture, conversations, db, vault, vault_dir
 
 # Phase 14 L4 insights (the seams): the seeded knowledge graph and the descriptive
 # growth report behind GET /insights/graph and GET /insights/growth. Both read the
@@ -97,6 +101,60 @@ _llama = llm_server.LlamaServer()
 _supervisor_task: asyncio.Task | None = None
 
 
+def _prewarm_voice_if_enabled() -> None:
+    """Load Kokoro in the background when voice is enabled, so the first spoken
+    reply doesn't pay the multi-second pipeline build mid-conversation.
+
+    Guarded by the ``voice_enabled`` setting so a voice-off session never loads
+    Kokoro — protecting the 8 GB M1 Air budget (CLAUDE.md): the cost is only paid
+    when the user actually wants voice. Also gated on autostart (a real app run,
+    ``EVA_START_LLAMA=1``) so importing the app under a ``TestClient`` never loads
+    the real voice model. Best-effort and non-blocking: from the async lifespan it
+    schedules a task on the loop; from the sync settings PATCH (a threadpool worker
+    with no running loop) it spawns a daemon thread.
+    """
+    if not _autostart_enabled():
+        return
+    try:
+        if not app_settings.get("voice_enabled"):
+            return
+    except Exception:  # noqa: BLE001 — prewarm is purely an optimization
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        loop.create_task(asyncio.to_thread(tts.prewarm))
+    else:
+        threading.Thread(target=tts.prewarm, daemon=True).start()
+
+
+async def _warm_model_persona() -> None:
+    """Once the model server is ready, prime its prompt cache with the persona.
+
+    The persona prefix (~600 tokens) is the same at the start of every chat turn,
+    but processing it cold costs several seconds of prompt-eval the *first* time.
+    Sending one tiny throwaway completion whose prompt starts with the persona
+    makes llama.cpp cache that prefix, so the user's first real turn reuses it
+    (sub-second time-to-first-token) instead of paying the cold cost. Best-effort:
+    any failure (model still loading, request error) just leaves the first turn to
+    warm the cache itself, exactly as before.
+    """
+    try:
+        if not await _llama.wait_ready():
+            return
+        persona = assembly.load_persona()
+        await llm_client.complete_chat(
+            [{"role": "user", "content": f"{persona}\n\nUser: hello"}],
+            max_tokens=1,
+            priority=False,
+        )
+        log.info("persona prompt cache warmed — first chat turn will be fast")
+    except Exception:  # noqa: BLE001 — warming is purely an optimization
+        log.debug("persona prewarm skipped", exc_info=True)
+
+
 def _autostart_enabled() -> bool:
     """Whether the backend should launch the model server on startup.
 
@@ -119,8 +177,13 @@ async def lifespan(app: FastAPI):
     global _supervisor_task
     if _autostart_enabled():
         if _llama.start():
-            asyncio.create_task(_llama.wait_ready())
+            # Warm the persona prompt cache once the server is ready (awaits
+            # readiness internally), so the user's first chat turn isn't cold.
+            asyncio.create_task(_warm_model_persona())
             _supervisor_task = asyncio.create_task(_llama.supervise())
+    # Warm Eva's voice ahead of the first spoken turn when voice is on (no-op
+    # otherwise), so the first reply speaks promptly instead of stalling on load.
+    _prewarm_voice_if_enabled()
     try:
         yield
     finally:
@@ -172,12 +235,13 @@ def health() -> dict:
     }
 
 
-def _parse_frame(raw: str) -> tuple[str, bool, bool]:
-    """Parse a ``/chat`` frame into ``(text, capture, voice)``.
+def _parse_frame(raw: str) -> tuple[str, bool, bool, str | None, str]:
+    """Parse a ``/chat`` frame into ``(text, capture, voice, conversation_id, mode)``.
 
     Accepts a bare string or a JSON object
-    ``{"text": "...", "capture": true, "voice": false}`` so the socket stays
-    friendly to a quick curl/ws test while letting the frontend control two flags:
+    ``{"text": "...", "capture": true, "voice": false, "conversation_id": "...",
+    "mode": "friend"}`` so the socket stays friendly to a quick curl/ws test while
+    letting the frontend control four things:
 
     * ``capture`` (default ``True``) — every normal turn is saved; the UI sets it
       ``False`` only when *retrying* a turn whose user text was already persisted,
@@ -186,19 +250,31 @@ def _parse_frame(raw: str) -> tuple[str, bool, bool]:
       for this turn (Phase 9). The UI sets it from the top-bar voice toggle; a bare
       text frame (or any client that doesn't ask) gets text only, so the heavy TTS
       path is opt-in per turn and the 8 GB budget is respected when voice is off.
+    * ``conversation_id`` (default ``None``) — which stored conversation this turn
+      belongs to. The UI sends it when continuing/reopening a conversation; when
+      absent on the first captured turn, the handler starts a new conversation and
+      tells the client its id.
+    * ``mode`` (default ``"friend"``) — how Eva should show up this turn: the UI's
+      Close friend / Coach / Mentor selector. Validated against the known modes in
+      the handler; an unknown value falls back to friend.
 
-    Returns the stripped text (possibly empty) with both flags resolved.
+    Returns the stripped text (possibly empty) with all flags resolved.
     """
     raw = raw.strip()
     if raw.startswith("{"):
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
-            return raw, True, False
+            return raw, True, False, None, assembly.DEFAULT_CHAT_MODE
         if isinstance(obj, dict):
             text = str(obj.get("text") or obj.get("message") or "").strip()
-            return text, bool(obj.get("capture", True)), bool(obj.get("voice", False))
-    return raw, True, False
+            conv = obj.get("conversation_id")
+            conv = str(conv) if conv else None
+            mode = str(obj.get("mode") or assembly.DEFAULT_CHAT_MODE)
+            if mode not in assembly.CHAT_MODES:
+                mode = assembly.DEFAULT_CHAT_MODE
+            return text, bool(obj.get("capture", True)), bool(obj.get("voice", False)), conv, mode
+    return raw, True, False, None, assembly.DEFAULT_CHAT_MODE
 
 
 # How many prior turns of the *current session* to carry into the model so a
@@ -284,6 +360,10 @@ async def chat_ws(ws: WebSocket) -> None:
     """
     await ws.accept()
     history: list[dict] = []
+    # The stored conversation this socket is writing to (chat history sidebar).
+    # Starts unset; created on the first captured turn, or adopted from the
+    # ``conversation_id`` the client sends when it reopens a past conversation.
+    conv_id: str | None = None
 
     # All sends on this socket are serialized through one lock. The Phase-9
     # VoiceStream worker emits audio frames from a separate coroutine while the main
@@ -297,16 +377,30 @@ async def chat_ws(ws: WebSocket) -> None:
 
     try:
         while True:
-            text, do_capture, want_voice = _parse_frame(await ws.receive_text())
+            text, do_capture, want_voice, frame_conv, mode = _parse_frame(await ws.receive_text())
             if not text:
                 await emit(
                     {"type": "error", "code": "empty", "message": "empty message"}
                 )
                 continue
 
+            # Adopt the conversation the client is continuing/reopening, if any.
+            # The frontend generates the id for a fresh thread and sends it from the
+            # first turn, so no id has to be echoed back over the socket.
+            if frame_conv:
+                conv_id = frame_conv
+
             # 1. Capture first — an absent model or a dropped reply never costs the
             #    entry. Retries (capture=False) skip this; their text is already saved.
+            #    The user turn is also recorded in the chat transcript (both sides),
+            #    creating/ensuring the conversation row so the history sidebar has
+            #    something to list immediately.
             if do_capture:
+                if conv_id is None:
+                    conv_id = conversations.start_conversation(text)
+                else:
+                    conversations.ensure_conversation(conv_id, text)
+                conversations.append_turn(conv_id, "user", text)
                 _capture_user_turn(text)
 
             if not llm_server.model_present():
@@ -324,14 +418,23 @@ async def chat_ws(ws: WebSocket) -> None:
             # 2. Interim crisis-care scan.
             addendum = crisis_check.crisis_addendum() if crisis_check.is_crisis(text) else ""
 
-            # 3. Listen-first intent gate, then retrieval ONLY on a retrieving
-            #    intent. A vent turn never queries the corpus — the discipline is
-            #    structural (§5.9), not a prompt plea — and is logged either way so
-            #    the bypass is visible in the demo logs.
-            intent = await intent_classifier.classify(text)
+            # 3. Pre-stream context, gathered CONCURRENTLY to trim time-to-first-
+            #    token. Intent classification, memory recall, and profile slices are
+            #    independent of one another, so they run together (recall/profile are
+            #    sync vector/file work, pushed to threads). Corpus retrieval is the
+            #    one dependent step — it only runs once intent says this turn
+            #    retrieves — so it follows the gather.
+            intent_task = asyncio.create_task(intent_classifier.classify(text))
+            recall_task = asyncio.create_task(asyncio.to_thread(retrieval.recall_memories, text))
+            profile_task = asyncio.create_task(asyncio.to_thread(profile.slices_for_prompt, text))
+
+            # 3a. Listen-first gate: only a retrieving intent queries the corpus. A
+            #     vent turn never does — the discipline is structural (§5.9), not a
+            #     prompt plea — and is logged either way so the bypass is visible.
+            intent = await intent_task
             corpus_context, citations = "", []
             if intent.retrieves:
-                passages = retrieval.retrieve_corpus(text)
+                passages = await asyncio.to_thread(retrieval.retrieve_corpus, text)
                 corpus_context = retrieval.format_corpus_context(passages)
                 citations = [p.as_citation() for p in passages]
                 log.info(
@@ -353,7 +456,7 @@ async def chat_ws(ws: WebSocket) -> None:
             #     surfaces nothing, so Eva never fabricates a memory or a chip.
             #     The current turn was captured above, but its embedding runs in the
             #     background (slow extraction first), so it cannot recall itself.
-            memories = retrieval.recall_memories(text)
+            memories = await recall_task
             memory_context = retrieval.format_memory_context(memories)
             if memories:
                 log.info(
@@ -367,8 +470,8 @@ async def chat_ws(ws: WebSocket) -> None:
             #     a reply can reference a stated goal unprompted, and topic-relevant
             #     patterns/loops are folded in when the message touches them. Returns
             #     "" when there is no profile (deleted profile.json → no slot, no
-            #     crash), so this is a one-line fill of an already-present slot.
-            profile_slices = profile.slices_for_prompt(text)
+            #     crash). Computed concurrently with intent/recall above (3.).
+            profile_slices = await profile_task
             if profile_slices:
                 log.info(
                     "profile → %d slice(s) in context",
@@ -376,7 +479,11 @@ async def chat_ws(ws: WebSocket) -> None:
                 )
 
             # 4. Assemble the system prompt with whatever slots are populated.
+            #    `mode` carries the UI's friend/coach/mentor choice for this turn.
+            if mode != assembly.DEFAULT_CHAT_MODE:
+                log.info("chat mode = %s", mode)
             system_prompt = assembly.build_chat_system_prompt(
+                mode=mode,
                 persona_addendum=addendum,
                 memory_context=memory_context,
                 profile_slices=profile_slices,
@@ -437,10 +544,21 @@ async def chat_ws(ws: WebSocket) -> None:
                 continue  # don't record a half/failed turn into history
 
             # 4. Record the completed turn for in-session coherence, bounded.
+            reply_text = "".join(reply_parts)
             history.append({"role": "user", "content": text})
-            history.append({"role": "assistant", "content": "".join(reply_parts)})
+            history.append({"role": "assistant", "content": reply_text})
             if len(history) > _MAX_HISTORY_TURNS:
                 del history[:-_MAX_HISTORY_TURNS]
+
+            # Persist Eva's reply to the chat transcript so a reopened conversation
+            # shows both sides. Only on a fresh turn (the user turn was appended at
+            # capture above); retries (capture=False) already have their user turn
+            # and skip re-persisting to avoid duplicate pairs.
+            if do_capture and conv_id is not None:
+                try:
+                    conversations.append_turn(conv_id, "eva", reply_text)
+                except Exception:  # noqa: BLE001 — transcript is best-effort
+                    log.exception("failed to persist Eva's reply to conversation")
     except WebSocketDisconnect:
         log.info("chat websocket disconnected")
 
@@ -484,11 +602,30 @@ _PREVIEW_CHARS = 140
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MD_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+", re.MULTILINE)
+_MD_TOKENS_RE = re.compile(r"[#>*_`~]+")
+
+
+def _strip_markdown(text: str) -> str:
+    """Flatten Markdown to readable plain text for a browse-list teaser.
+
+    Entries are stored as Markdown now, so a raw preview would show ``#``/``**``
+    noise. This drops the syntax (keeping link/image alt text) without trying to
+    be a full renderer — it only needs to read cleanly in a one-line preview.
+    """
+    text = _MD_IMAGE_RE.sub(lambda m: m.group(1), text)
+    text = _MD_LINK_RE.sub(lambda m: m.group(1), text)
+    text = _MD_LIST_RE.sub("", text)
+    return _MD_TOKENS_RE.sub("", text)
+
+
 def _preview(text: str | None) -> str:
     """Collapse an entry to a short single-line teaser for the browse list."""
     if not text:
         return ""
-    flat = " ".join(text.split())
+    flat = " ".join(_strip_markdown(text).split())
     return flat if len(flat) <= _PREVIEW_CHARS else flat[: _PREVIEW_CHARS - 1].rstrip() + "…"
 
 
@@ -572,6 +709,205 @@ def journal_day(date: str) -> dict:
         "date": date,
         "entries": [{"id": t.id, "time": t.time, "text": t.text} for t in turns],
     }
+
+
+@app.get("/journal/entries")
+def journal_entries() -> dict:
+    """List individual journal posts, newest first (the history index).
+
+    Unlike :func:`journal_days`, this does NOT group by day — every saved entry
+    is its own post with its own id, timestamp and preview, so the journal
+    surface can show a flat history (grid or list) and open any single post.
+    Primary source is the L1 index; it is then unioned with any journal turns
+    found in the L0 day files that the index does not know about (e.g. an older
+    hand-placed file), so the Markdown source of truth is never invisible.
+    """
+    conn = db.get_or_create_db()
+    try:
+        rows = db.list_journal_entries(conn)
+    finally:
+        conn.close()
+
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        seen.add(r["id"])
+        entries.append(
+            {
+                "id": r["id"],
+                "date": r["date"],
+                "created_at": r["created_at"],
+                "preview": _preview(r["text"]),
+                "word_count": r["word_count"],
+            }
+        )
+
+    for date in vault.list_day_dates():
+        for turn in vault.read_day(date):
+            if turn.type != "journal" or (turn.id is not None and turn.id in seen):
+                continue
+            if turn.id is not None:
+                seen.add(turn.id)
+            entries.append(
+                {
+                    "id": turn.id,
+                    "date": date,
+                    "created_at": f"{date}T{turn.time}",
+                    "preview": _preview(turn.text),
+                    "word_count": len(turn.text.split()),
+                }
+            )
+
+    entries.sort(key=lambda e: e["created_at"] or "", reverse=True)
+    return {"entries": entries}
+
+
+@app.get("/journal/entry/{entry_id}")
+def journal_entry(entry_id: str) -> dict:
+    """Return one full journal post by id, for the read-only entry view.
+
+    Reads the L1 index (which stores the entry text verbatim), then falls back to
+    scanning the L0 day files so a hand-placed entry that was never indexed still
+    opens. 404 if no journal entry with that id exists.
+    """
+    conn = db.get_or_create_db()
+    try:
+        row = db.get_entry(conn, entry_id)
+    finally:
+        conn.close()
+    if row is not None and row["type"] == "journal":
+        return {
+            "id": row["id"],
+            "date": row["date"],
+            "created_at": row["created_at"],
+            "text": row["text"],
+        }
+
+    for date in vault.list_day_dates():
+        for turn in vault.read_day(date):
+            if turn.type == "journal" and turn.id == entry_id:
+                return {
+                    "id": turn.id,
+                    "date": date,
+                    "created_at": f"{date}T{turn.time}",
+                    "text": turn.text,
+                }
+    raise HTTPException(status_code=404, detail="no journal entry with that id")
+
+
+@app.post("/journal/entry/{entry_id}")
+def update_journal_entry(
+    entry_id: str, body: JournalIn, background: BackgroundTasks
+) -> dict:
+    """Edit an existing journal entry: rewrite its L0 Markdown, re-index, re-extract.
+
+    The vault rewrite (the one place append-only is relaxed) keeps a ``.bak`` and
+    is atomic; we then bring the L1 index text/word_count in step and re-run the
+    same background extraction + embed the save path uses, so the entry's mood,
+    themes, and recall vector reflect the new text. 404 if the id isn't found.
+    """
+    try:
+        rec = vault.update_entry(entry_id, body.text)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if rec is None:
+        raise HTTPException(status_code=404, detail="no journal entry with that id")
+
+    conn = db.get_or_create_db()
+    try:
+        db.update_entry_text(conn, rec.id, text=rec.text, word_count=rec.word_count)
+    finally:
+        conn.close()
+
+    background.add_task(capture.run_extraction_and_embed, rec.id, rec.text, rec.date)
+    return {
+        "id": rec.id,
+        "date": rec.date,
+        "created_at": rec.created_at,
+        "text": rec.text,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Journal photos. Images attached to an entry live alongside the L0 Markdown in
+# <vault>/journal/media/ and are referenced from the entry text as Markdown
+# (![caption](media/<file>)), so the photo travels with the source of truth and
+# renders without the database. Bytes are served back over loopback only — an
+# upload never leaves the machine (privacy hard law).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_MAX_MEDIA_BYTES = 12 * 1024 * 1024  # 12 MB — generous for a phone photo, bounded.
+
+
+def _media_dir() -> Path:
+    """Return (creating if needed) the directory holding journal images."""
+    d = vault.journal_dir() / "media"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@app.post("/journal/media")
+async def journal_media_upload(file: UploadFile = File(...)) -> dict:
+    """Store one image for a journal entry; return its vault-relative path.
+
+    The path (``media/<uuid>.<ext>``) is what the editor writes into the entry
+    Markdown. The image is read back via :func:`journal_media`. Rejects anything
+    that is not a known image type or is larger than 12 MB, so a bad upload fails
+    cleanly instead of bloating the vault.
+    """
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in _MEDIA_EXTS:
+        raise HTTPException(status_code=415, detail=f"unsupported image type {ext or '(none)'}")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="the image file was empty")
+    if len(data) > _MAX_MEDIA_BYTES:
+        raise HTTPException(status_code=413, detail="image is larger than the 12 MB limit")
+    name = f"{uuid.uuid4().hex}{ext}"
+    (_media_dir() / name).write_bytes(data)
+    log.info("journal: stored image %s (%d bytes)", name, len(data))
+    return {"path": f"media/{name}", "filename": name}
+
+
+@app.get("/journal/media/{filename}")
+def journal_media(filename: str) -> FileResponse:
+    """Serve one stored journal image by filename (read-only, loopback only)."""
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="bad filename")
+    path = _media_dir() / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="no such image")
+    return FileResponse(path)
+
+
+@app.get("/chat/conversations")
+def chat_conversations() -> dict:
+    """List stored chat conversations, most recently active first (history rail).
+
+    Titles only (no turn text) — the Chat screen's conversation rail just needs a
+    list it can click; the transcript is loaded on demand by ``/chat/conversation``.
+    """
+    return {"conversations": conversations.list_conversations()}
+
+
+@app.get("/chat/conversation/{conversation_id}")
+def chat_conversation(conversation_id: str) -> dict:
+    """Return one conversation with its ordered turns (both sides) to rehydrate it.
+
+    404 if the conversation id is unknown (e.g. it was deleted), so the UI can fall
+    back to a fresh thread.
+    """
+    convo = conversations.get_conversation(conversation_id)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="no such conversation")
+    return convo
+
+
+@app.delete("/chat/conversation/{conversation_id}")
+def chat_conversation_delete(conversation_id: str) -> dict:
+    """Delete a conversation and its turns. Idempotent (``deleted`` is False if gone)."""
+    return {"deleted": conversations.delete_conversation(conversation_id)}
 
 
 class AcknowledgeIn(BaseModel):
@@ -995,6 +1331,10 @@ def patch_settings(body: SettingsPatch) -> dict:
         updated = app_settings.update(patch)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # If this turned voice ON, warm Kokoro now so the next spoken reply is prompt
+    # rather than paying the load on the first sentence.
+    if patch.get("voice_enabled") is True:
+        _prewarm_voice_if_enabled()
     return _settings_response(updated)
 
 

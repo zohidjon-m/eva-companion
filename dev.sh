@@ -24,9 +24,10 @@ if [ ! -d backend/.venv ]; then
 fi
 
 echo "[dev] starting backend on http://127.0.0.1:8000 …"
-# EVA_START_LLAMA=1 → the backend launches & supervises the model server
-# (python -m llama_cpp.server on :11500) as a sidecar (EVA_SYSTEM_DESIGN §4).
-# A missing GGUF degrades gracefully to first-run setup; it never crashes.
+# EVA_START_LLAMA=1 → the backend launches & supervises the model server (the
+# native llama.cpp `llama-server` binary on :11500) as a sidecar (§4). Install it
+# with `brew install llama.cpp`. A missing GGUF or binary degrades gracefully to
+# first-run setup; it never crashes.
 ( cd backend && EVA_START_LLAMA=1 exec .venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --reload ) &
 BACKEND_PID=$!
 

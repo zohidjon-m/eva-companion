@@ -64,6 +64,19 @@ _LEXICON: list[tuple[str, str, str]] = [
 ]
 _LEXICON_COMPILED = [(re.compile(p, re.IGNORECASE), t, label) for p, t, label in _LEXICON]
 
+# John demo lexicon (scripts/seed_john.py). Themes already cover his habits
+# (screen time, running, cooking, reading, …), so the lexicon only adds what the
+# structured theme/emotion fields can't express — the people and places he writes
+# about — keeping every label distinct from a theme so a concept never doubles up.
+_JOHN_LEXICON: list[tuple[str, str, str]] = [
+    (r"\bmarcus\b", "person", "Marcus"),
+    (r"\bsarah\b", "person", "Sarah"),
+    (r"\blake\b", "place", "The lake"),
+    (r"\bmarket\b", "place", "The market"),
+    (r"\bpark\b", "place", "The park"),
+]
+_JOHN_LEXICON_COMPILED = [(re.compile(p, re.IGNORECASE), t, label) for p, t, label in _JOHN_LEXICON]
+
 # Curated hypothesis edges — the only model-*proposed* links (everything else is
 # observed co-occurrence). Each names two concept labels that must already exist as
 # nodes; the edge is rendered dashed with a confirm/dismiss affordance and is never
@@ -72,6 +85,13 @@ _HYPOTHESES: list[tuple[str, str, str, float]] = [
     ("A running habit", "calm", "may be steadying you", 0.6),
     ("Praying fajr", "discipline", "may be reinforcing", 0.58),
     ("Deadline pressure", "anxiety", "may be a trigger for", 0.62),
+]
+
+# John's proposed (dashed) links — endpoints must be labels that survive as nodes.
+_JOHN_HYPOTHESES: list[tuple[str, str, str, float]] = [
+    ("screen time", "sleep", "may be costing you", 0.62),
+    ("running", "calm", "may be steadying you", 0.6),
+    ("Marcus", "connection", "may be lifting your mood", 0.58),
 ]
 
 
@@ -114,14 +134,24 @@ def _json_list(raw: str | None) -> list:
 
 
 def build_seed_graph(rows) -> tuple[list[GraphNode], list[GraphEdge]]:
-    """Derive (nodes, edges) from seeded extraction rows. Pure — no DB writes.
+    """Build the *seeded* demo graph (is_seeded=True) — thin wrapper over the core."""
+    return _build_graph(
+        rows, lexicon_compiled=_LEXICON_COMPILED, hypotheses=_HYPOTHESES, is_seeded=True
+    )
 
-    ``rows`` are :func:`db.seeded_extractions` rows (entry_id, text, themes JSON,
-    emotions JSON). Theme and emotion nodes are read from the structured fields;
-    person/place/goal/problem nodes come from the curated lexicon scan over the
-    entry text. Edges are the co-occurrence between concepts that share entries
-    (overlap coefficient, thresholded and degree-capped), plus the curated
-    hypothesis edges. Every node/edge is ``is_seeded=True``.
+
+def _build_graph(
+    rows, *, lexicon_compiled, hypotheses, is_seeded: bool
+) -> tuple[list[GraphNode], list[GraphEdge]]:
+    """Derive (nodes, edges) from extraction rows. Pure — no DB writes.
+
+    ``rows`` are extraction rows (entry_id, text, themes JSON, emotions JSON).
+    Theme and emotion nodes are read from the structured fields; person/place/
+    goal/problem nodes come from the given ``lexicon_compiled`` scan over the entry
+    text. Edges are the co-occurrence between concepts that share entries (overlap
+    coefficient, thresholded and degree-capped), plus the given ``hypotheses``
+    edges. ``is_seeded`` stamps every node/edge so the seeded demo and the real
+    graph share this one builder while staying separable in the DB.
     """
     # 1. Concept → set of entry-ids it appears in, with a type. Emotions are added
     #    first so a label shared by an emotion and a theme (e.g. "calm") resolves
@@ -149,7 +179,7 @@ def build_seed_graph(rows) -> tuple[list[GraphNode], list[GraphEdge]]:
     for r in rows:
         eid = r["entry_id"]
         text = (r["text"] or "")
-        for pattern, ctype, label in _LEXICON_COMPILED:
+        for pattern, ctype, label in lexicon_compiled:
             if pattern.search(text):
                 _add(label, ctype, eid)
 
@@ -175,6 +205,7 @@ def build_seed_graph(rows) -> tuple[list[GraphNode], list[GraphEdge]]:
                 type=concept_type[label],
                 entry_count=len(kept[label]),
                 entries=sorted(kept[label]),
+                is_seeded=is_seeded,
             )
         )
 
@@ -182,7 +213,7 @@ def build_seed_graph(rows) -> tuple[list[GraphNode], list[GraphEdge]]:
     #    never duplicates a hypothesised link as a plain edge.
     edges: list[GraphEdge] = []
     hypothesis_pairs: set[frozenset[str]] = set()
-    for src_label, tgt_label, edge_label, weight in _HYPOTHESES:
+    for src_label, tgt_label, edge_label, weight in hypotheses:
         if src_label not in node_id or tgt_label not in node_id:
             continue  # endpoint didn't survive the support filter — skip silently
         shared = kept[src_label] & kept[tgt_label]
@@ -197,6 +228,7 @@ def build_seed_graph(rows) -> tuple[list[GraphNode], list[GraphEdge]]:
                 is_hypothesis=True,
                 label=edge_label,
                 entries=evidence,
+                is_seeded=is_seeded,
             )
         )
         hypothesis_pairs.add(frozenset((src_label, tgt_label)))
@@ -236,6 +268,7 @@ def build_seed_graph(rows) -> tuple[list[GraphNode], list[GraphEdge]]:
                 is_hypothesis=False,
                 label=None,
                 entries=shared,
+                is_seeded=is_seeded,
             )
         )
 
@@ -266,6 +299,38 @@ def store_seed_graph(conn) -> tuple[int, int]:
         )
     conn.commit()
     log.info("stored seeded graph: %d node(s), %d edge(s)", len(nodes), len(edges))
+    return len(nodes), len(edges)
+
+
+def store_graph(conn) -> tuple[int, int]:
+    """Build the REAL graph (is_seeded=0) from real extractions and persist it.
+
+    The live counterpart to :func:`store_seed_graph`: reads the user's real
+    extractions, builds nodes/edges with the John demo lexicon/hypotheses, and
+    replaces the existing ``is_seeded=0`` graph rows. Seeded rows are untouched.
+    Returns the (nodes, edges) counts written.
+    """
+    rows = db.real_extractions(conn)
+    nodes, edges = _build_graph(
+        rows, lexicon_compiled=_JOHN_LEXICON_COMPILED, hypotheses=_JOHN_HYPOTHESES,
+        is_seeded=False,
+    )
+
+    conn.execute("DELETE FROM graph_edges WHERE is_seeded = 0")
+    conn.execute("DELETE FROM graph_nodes WHERE is_seeded = 0")
+    for n in nodes:
+        db.insert_graph_node(
+            conn, id=n.id, label=n.label, type=n.type,
+            entry_count=n.entry_count, entries=n.entries, is_seeded=False,
+        )
+    for e in edges:
+        db.insert_graph_edge(
+            conn, id=e.id, source=e.source, target=e.target, type=e.type,
+            weight=e.weight, is_hypothesis=e.is_hypothesis, label=e.label,
+            entries=e.entries, is_seeded=False,
+        )
+    conn.commit()
+    log.info("stored real graph: %d node(s), %d edge(s)", len(nodes), len(edges))
     return len(nodes), len(edges)
 
 

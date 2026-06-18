@@ -2,7 +2,7 @@
 -- Increment PRAGMA user_version on every schema change; add a migration block in db.py.
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
--- PRAGMA user_version = 2;
+-- PRAGMA user_version = 3;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- L0 index (truth lives in Markdown files; this table is the queryable index)
@@ -84,6 +84,30 @@ CREATE TABLE IF NOT EXISTS graph_edges (
     entries      TEXT,                           -- JSON: [entry_id]
     is_seeded    INTEGER NOT NULL DEFAULT 0      -- 1 = demo seed data; pruned when the real L4 builder runs
 );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Chat conversations — the full back-and-forth (user + Eva) for the Chat history
+-- UI. Kept SEPARATE from the journal vault on purpose: entries/extractions hold
+-- the user's own words for L1 extraction and memory recall, and Eva's replies
+-- never belong there. These tables store the raw transcript so the Chat screen
+-- can list past conversations and reopen them. Derived/rebuildable like the rest
+-- of eva.db; deleting them loses chat history but nothing the journal needs.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS conversations (
+    id          TEXT PRIMARY KEY,            -- UUID v4
+    started_at  TEXT NOT NULL,               -- ISO-8601
+    last_at     TEXT NOT NULL,               -- ISO-8601; bumped on every turn
+    title       TEXT                         -- preview of the first user message
+);
+
+CREATE TABLE IF NOT EXISTS chat_turns (
+    id              TEXT PRIMARY KEY,         -- UUID v4
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL CHECK(role IN ('user','eva')),
+    text            TEXT NOT NULL,
+    created_at      TEXT NOT NULL             -- ISO-8601
+);
+CREATE INDEX IF NOT EXISTS idx_chat_turns_conv ON chat_turns(conversation_id, created_at);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Rollup digests (week → month → era)

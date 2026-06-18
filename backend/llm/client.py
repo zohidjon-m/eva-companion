@@ -32,7 +32,7 @@ from llm import server
 
 log = logging.getLogger("eva.llm.client")
 
-# OpenAI-compatible chat endpoint served by ``python -m llama_cpp.server`` on
+# OpenAI-compatible chat endpoint served by the native ``llama-server`` binary on
 # :11500. Only loopback is contacted, so the privacy net-guard permits it.
 CHAT_URL = f"{server.BASE_URL}/v1/chat/completions"
 

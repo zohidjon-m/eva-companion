@@ -161,6 +161,25 @@ def _ensure_pipeline():
     return _pipeline
 
 
+def prewarm() -> bool:
+    """Eagerly load the Kokoro pipeline so the first voiced reply doesn't stall.
+
+    The first :func:`synthesize` otherwise pays the full pipeline build (torch +
+    weights, a few seconds) mid-conversation. Calling this ahead of time — when
+    voice is enabled, on a background thread — moves that cost off the user's first
+    spoken turn. Best-effort: it shares ``synthesize``'s lock and swallows
+    :class:`TTSUnavailable` (weights absent / offline), so a failed prewarm simply
+    leaves voice lazy and text-only, exactly as before. Returns whether the
+    pipeline is now resident.
+    """
+    with _lock:
+        try:
+            _ensure_pipeline()
+            return True
+        except TTSUnavailable:
+            return False
+
+
 def _synthesize_samples(text: str):
     """Synthesize ``text`` to a 1-D float32 array of 24 kHz samples. Seam for tests.
 

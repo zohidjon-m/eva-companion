@@ -38,7 +38,7 @@ function nodeRadius(n: GraphNode): number {
 }
 
 export function GraphView() {
-  const { graph, evidence, includeSeeded, loaded, error, setIncludeSeeded } = useGraph();
+  const { graph, evidence, loaded, error } = useGraph();
   const [selection, setSelection] = useState<Selection>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [confirmed, setConfirmed] = useState<Set<string>>(new Set());
@@ -86,19 +86,6 @@ export function GraphView() {
             to see the entries behind it.
           </p>
         </div>
-        <label className="insights__demo">
-          <input
-            type="checkbox"
-            checked={includeSeeded}
-            onChange={(e) => {
-              setIncludeSeeded(e.target.checked);
-              setSelection(null);
-              setDismissed(new Set());
-              setConfirmed(new Set());
-            }}
-          />
-          <span>Demo data</span>
-        </label>
       </header>
 
       {error ? (
@@ -114,7 +101,6 @@ export function GraphView() {
           eyebrow="Connections"
           title="The map is still drawing itself"
           description="As you write, Eva starts to see how your themes, people, and feelings connect. After a few weeks there's a web here to explore."
-          footnote={includeSeeded ? undefined : <>Turn on “Demo data” to preview a sample graph.</>}
         />
       ) : (
         <div className="graph">

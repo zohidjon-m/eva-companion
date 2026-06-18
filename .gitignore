@@ -34,3 +34,11 @@ scripts/_eva_testbook.txt
 # --- OS / editor noise ---
 .DS_Store
 *.log
+
+# --- Vault backups (private data; created by seed/reset scripts) ---
+local_vault.bak*/
+
+# --- Skills CLI / agent tooling (machine-local, not project source) ---
+.agents/
+.claude/skills/
+skills-lock.json

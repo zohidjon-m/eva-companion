@@ -1,4 +1,5 @@
 import { AppShell } from "./layout/AppShell";
+import { PersonaProvider } from "./layout/PersonaContext";
 import { HealthProvider } from "./useHealth";
 import { VoiceProvider } from "./voice/VoiceContext";
 
@@ -16,7 +17,9 @@ function App() {
   return (
     <HealthProvider>
       <VoiceProvider>
-        <AppShell />
+        <PersonaProvider>
+          <AppShell />
+        </PersonaProvider>
       </VoiceProvider>
     </HealthProvider>
   );

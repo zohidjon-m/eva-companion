@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { MoodPoint } from "./api";
+import { moodWord } from "./mood";
 
 /**
  * MoodChart — a bespoke SVG line/area chart of mood over time.
@@ -17,11 +18,25 @@ import type { MoodPoint } from "./api";
 
 const VB_W = 720;
 const VB_H = 300;
-const PAD = { left: 40, right: 18, top: 20, bottom: 30 };
+const PAD = { left: 64, right: 18, top: 20, bottom: 30 };
 const PLOT_W = VB_W - PAD.left - PAD.right;
 const PLOT_H = VB_H - PAD.top - PAD.bottom;
 const MOOD_MIN = -5;
 const MOOD_MAX = 5;
+
+/**
+ * The y-axis reads in plain words, not the raw −5…5 score: "how the day felt"
+ * is what a person understands, not a number. Five evenly-spaced bands label the
+ * scale; `moodWord` maps any single mood value to the same vocabulary for the
+ * hover tooltip, so the axis and the tooltip always speak the same language.
+ */
+const MOOD_BANDS: { at: number; label: string }[] = [
+  { at: 4, label: "Great" },
+  { at: 2, label: "Good" },
+  { at: 0, label: "Okay" },
+  { at: -2, label: "Low" },
+  { at: -4, label: "Rough" },
+];
 
 /** Days since the unix epoch for a YYYY-MM-DD string (UTC, so no tz day-shift). */
 function dayNumber(iso: string): number {
@@ -118,18 +133,18 @@ export function MoodChart({
           </linearGradient>
         </defs>
 
-        {/* Horizontal gridlines + y labels at +5 / 0 / −5. */}
-        {[5, 0, -5].map((m) => (
-          <g key={m}>
+        {/* Horizontal gridlines + word labels (Great / Good / Okay / Low / Rough). */}
+        {MOOD_BANDS.map(({ at, label }) => (
+          <g key={at}>
             <line
-              className={m === 0 ? "moodchart__axis" : "moodchart__grid"}
+              className={at === 0 ? "moodchart__axis" : "moodchart__grid"}
               x1={PAD.left}
               x2={VB_W - PAD.right}
-              y1={yForMood(m)}
-              y2={yForMood(m)}
+              y1={yForMood(at)}
+              y2={yForMood(at)}
             />
-            <text className="moodchart__ylabel" x={PAD.left - 8} y={yForMood(m) + 4} textAnchor="end">
-              {m > 0 ? `+${m}` : m}
+            <text className="moodchart__ylabel" x={PAD.left - 10} y={yForMood(at) + 4} textAnchor="end">
+              {label}
             </text>
           </g>
         ))}
@@ -191,10 +206,7 @@ export function MoodChart({
         >
           <div className="moodchart__tip-head">
             <span className="moodchart__tip-date">{shortDate(hovered.date)}</span>
-            <span className="moodchart__tip-mood">
-              mood {hovered.mood! > 0 ? `+${hovered.mood}` : hovered.mood}
-            </span>
-            {hovered.is_seeded && <span className="moodchart__tip-seed">demo</span>}
+            <span className="moodchart__tip-mood">{moodWord(hovered.mood!)}</span>
           </div>
           {hovered.summary && <p className="moodchart__tip-summary">{hovered.summary}</p>}
         </div>

@@ -37,10 +37,13 @@ def test_populated_slots_appended_in_order():
     assert out.startswith("PERSONA")
     # Order is persona -> memory -> profile -> corpus.
     assert out.index("MEM") < out.index("PROF") < out.index("CORP")
-    # Each context slot carries an explanatory header, not a bare paste.
-    assert "past journal entries" in out
-    assert "profile" in out
+    # Each context slot carries an explanatory, friend-framed header, not a bare paste.
+    assert "shared with you before" in out
+    assert "know about them" in out
     assert "library" in out
+    # With context present, the prompt closes on Eva's voice (the #7 reminder).
+    assert "Reply as Eva" in out
+    assert out.index("CORP") < out.index("Reply as Eva")
 
 
 def test_blank_slot_strings_contribute_nothing():

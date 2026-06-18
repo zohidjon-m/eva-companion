@@ -1,18 +1,23 @@
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../components";
 import { MicButton } from "../voice/MicButton";
-import { appendTranscript } from "../voice/text";
-import { useJournal, type AckState, type UseJournal } from "./useJournal";
-import type { DayEntry, JournalDay } from "./api";
+import { JournalEditor, type JournalEditorHandle } from "./Editor";
+import {
+  useJournal,
+  type AckState,
+  type JournalLayout,
+  type UseJournal,
+} from "./useJournal";
+import { toDisplayMarkdown, type JournalEntry } from "./api";
 
 /**
- * JournalScreen — the Phase-5 journaling surface, deliberately not a chat thread.
+ * JournalScreen — the journaling surface, a stream of discrete posts.
  *
- * A two-pane ritual: a left rail to browse past days (the seed of time-travel)
- * and a calm, full-height editor on the right for today's entry. Saving is
- * explicit; the draft autosaves to this device every ~10s so nothing is lost.
- * After a save, Eva offers one gentle line — a reflection or a soft question,
- * never advice. Selecting a past day swaps the editor for a read-only day view.
+ * It opens on a flat history of past entries (newest first) shown as a grid of
+ * cards or a list of rows — the reader's choice, remembered between visits — with
+ * an explicit "New entry" action. Writing happens on its own compose screen;
+ * every Save creates a separate post. Opening a post shows it read-only, with
+ * Eva's one gentle line when it was just written.
  */
 
 export function JournalScreen() {
@@ -20,96 +25,159 @@ export function JournalScreen() {
 
   return (
     <div className="journal">
-      <Aside journal={j} />
-      <section className="journal__main">
-        {j.view.kind === "write" ? (
-          <Writer journal={j} />
-        ) : (
-          <DayView
-            date={j.view.date}
-            entries={j.dayEntries}
-            loading={j.dayLoading}
-            onBack={() => j.openDay(j.today)}
-          />
-        )}
-      </section>
+      {j.view.kind === "index" && <HistoryIndex journal={j} />}
+      {j.view.kind === "compose" && <Composer journal={j} />}
+      {j.view.kind === "entry" && <EntryView journal={j} />}
     </div>
   );
 }
 
-/* --- Left rail: browse past days ------------------------------------------ */
+/* --- History index: the landing view -------------------------------------- */
 
-function Aside({ journal: j }: { journal: UseJournal }) {
-  const writing = j.view.kind === "write";
+function HistoryIndex({ journal: j }: { journal: UseJournal }) {
   return (
-    <aside className="journal__aside">
-      <p className="journal__aside-head">Your journal</p>
-      <button
-        className={`jday jday--today${writing ? " jday--active" : ""}`}
-        onClick={j.openWrite}
-      >
-        <span className="jday__date">
-          <Icon name="feather" size={16} /> Today
-        </span>
-        <span className="jday__preview">Write a new entry</span>
-      </button>
+    <section className="journal__main">
+      <div className="jhist">
+        <header className="jhist__bar">
+          <h2 className="jhist__title">Your journal</h2>
+          <div className="jhist__actions">
+            {j.entries.length > 0 && (
+              <LayoutToggle layout={j.layout} onChange={j.setLayout} />
+            )}
+            <button className="btn btn--primary btn--md" onClick={j.openCompose}>
+              <Icon name="feather" size={16} /> New entry
+            </button>
+          </div>
+        </header>
 
-      {j.days.length > 0 && <p className="journal__aside-label">Past entries</p>}
-      <div className="journal__days">
-        {j.days
-          .filter((d) => d.date !== j.today)
-          .map((d) => (
-            <DayButton
-              key={d.date}
-              day={d}
-              today={j.today}
-              active={j.view.kind === "day" && j.view.date === d.date}
-              onClick={() => j.openDay(d.date)}
-            />
-          ))}
-        {j.days.filter((d) => d.date !== j.today).length === 0 && (
-          <p className="journal__aside-empty">
-            Entries you save will gather here, day by day.
-          </p>
+        {j.loadingEntries && j.entries.length === 0 ? (
+          <p className="jhist__empty">Gathering your entries…</p>
+        ) : j.entries.length === 0 ? (
+          <EmptyHistory onNew={j.openCompose} />
+        ) : j.layout === "grid" ? (
+          <div className="jhist__grid">
+            {j.entries.map((e) => (
+              <EntryCard
+                key={e.id}
+                entry={e}
+                today={j.today}
+                onOpen={() => j.openEntry(e.id)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="jhist__list">
+            {j.entries.map((e) => (
+              <EntryRow
+                key={e.id}
+                entry={e}
+                today={j.today}
+                onOpen={() => j.openEntry(e.id)}
+              />
+            ))}
+          </div>
         )}
       </div>
-    </aside>
+    </section>
   );
 }
 
-function DayButton({
-  day,
+/** One post as a card (grid layout). */
+function EntryCard({
+  entry,
   today,
-  active,
-  onClick,
+  onOpen,
 }: {
-  day: JournalDay;
+  entry: JournalEntry;
   today: string;
-  active: boolean;
-  onClick: () => void;
+  onOpen: () => void;
 }) {
   return (
-    <button className={`jday${active ? " jday--active" : ""}`} onClick={onClick}>
-      <span className="jday__date">
-        {formatDate(day.date, today)}
-        {day.count > 1 && <span className="jday__count">{day.count}</span>}
-      </span>
-      <span className="jday__preview">{day.preview || "—"}</span>
+    <button className="jcard" onClick={onOpen}>
+      <span className="jcard__date">{formatDate(entry.date, today)}</span>
+      <span className="jcard__time">{timeFromCreated(entry.created_at)}</span>
+      <span className="jcard__preview">{entry.preview || "—"}</span>
+      <span className="jcard__meta">{entry.word_count} words</span>
     </button>
   );
 }
 
-/* --- Right pane: today's editor ------------------------------------------- */
+/** One post as a row (list layout, like a chat-history rail). */
+function EntryRow({
+  entry,
+  today,
+  onOpen,
+}: {
+  entry: JournalEntry;
+  today: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button className="jrow" onClick={onOpen}>
+      <span className="jrow__date">
+        {formatDate(entry.date, today)} · {timeFromCreated(entry.created_at)}
+      </span>
+      <span className="jrow__preview">{entry.preview || "—"}</span>
+    </button>
+  );
+}
 
-function Writer({ journal: j }: { journal: UseJournal }) {
-  const taRef = useRef<HTMLTextAreaElement>(null);
+/** Grid/list segmented toggle. */
+function LayoutToggle({
+  layout,
+  onChange,
+}: {
+  layout: JournalLayout;
+  onChange: (l: JournalLayout) => void;
+}) {
+  return (
+    <div className="jtoggle" role="group" aria-label="History layout">
+      <button
+        className={`jtoggle__btn${layout === "grid" ? " jtoggle__btn--on" : ""}`}
+        onClick={() => onChange("grid")}
+        aria-pressed={layout === "grid"}
+        title="Grid"
+      >
+        <GridGlyph />
+      </button>
+      <button
+        className={`jtoggle__btn${layout === "list" ? " jtoggle__btn--on" : ""}`}
+        onClick={() => onChange("list")}
+        aria-pressed={layout === "list"}
+        title="List"
+      >
+        <ListGlyph />
+      </button>
+    </div>
+  );
+}
+
+function EmptyHistory({ onNew }: { onNew: () => void }) {
+  return (
+    <div className="jhist__empty-state">
+      <p className="jhist__empty-title">Your journal is empty</p>
+      <p className="jhist__empty-sub">
+        Each entry you write becomes its own post, kept here on this device.
+      </p>
+      <button className="btn btn--primary btn--md" onClick={onNew}>
+        <Icon name="feather" size={16} /> Write your first entry
+      </button>
+    </div>
+  );
+}
+
+/* --- Compose: a new post --------------------------------------------------- */
+
+function Composer({ journal: j }: { journal: UseJournal }) {
+  const editorRef = useRef<JournalEditorHandle>(null);
+  const [imgError, setImgError] = useState<string | null>(null);
 
   // Land in the editor ready to type.
   useEffect(() => {
-    if (!j.saving) taRef.current?.focus();
+    if (!j.saving) editorRef.current?.focus();
   }, [j.saving]);
 
-  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     // Cmd/Ctrl+Enter saves; plain Enter is a newline (this is long-form writing).
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -119,63 +187,161 @@ function Writer({ journal: j }: { journal: UseJournal }) {
 
   const canSave = j.draft.trim().length > 0 && !j.saving;
 
-  // Dictation appends to the draft for the user to read over and edit before they
-  // explicitly Save — the spoken path stays the same ritual as typing, just with
-  // the words captured by voice. setDraft is the raw state setter, so the updater
-  // form keeps this correct even if several transcripts land in quick succession.
+  // Dictation inserts the spoken words at the cursor for the user to read over
+  // and edit before they explicitly Save — same ritual as typing.
   const onTranscribed = (text: string) => {
-    j.setDraft((d) => appendTranscript(d, text));
-    taRef.current?.focus();
+    editorRef.current?.insertText(text);
   };
 
   return (
-    <div className="journal__editor">
-      <div className="journal__editor-scroll">
-        {j.todayEntries.length > 0 && (
-          <EarlierToday entries={j.todayEntries} />
-        )}
-
-        <h2 className="journal__prompt">How was your day?</h2>
-        <textarea
-          ref={taRef}
-          className="journal__field"
-          placeholder="Write as much or as little as you like. This stays on your device."
-          value={j.draft}
-          disabled={j.saving}
-          onChange={(e) => j.setDraft(e.target.value)}
-          onKeyDown={onKeyDown}
-          aria-label="Today's journal entry"
-        />
-
-        <Acknowledgment ack={j.ack} />
-        {j.saveError && <p className="journal__error">{j.saveError}</p>}
-      </div>
-
-      <div className="journal__footer">
-        <div className="journal__footer-left">
-          <MicButton onTranscribed={onTranscribed} disabled={j.saving} />
-          <span className="journal__autosave">{autosaveLabel(j.draft, j.draftSavedAt)}</span>
+    <section className="journal__main">
+      <div className="journal__editor" onKeyDown={onKeyDown}>
+        <div className="journal__editor-scroll">
+          <div className="journal__dayhead">
+            <button className="btn btn--ghost btn--sm" onClick={j.openIndex}>
+              ← All entries
+            </button>
+            <h2 className="journal__prompt">New entry</h2>
+          </div>
+          <JournalEditor
+            ref={editorRef}
+            editable
+            value={j.draft}
+            onChange={(md) => j.setDraft(md)}
+            onUploadError={setImgError}
+          />
+          {imgError && <p className="journal__error">{imgError}</p>}
+          {j.saveError && <p className="journal__error">{j.saveError}</p>}
         </div>
-        <button className="btn btn--primary btn--md" onClick={j.save} disabled={!canSave}>
-          {j.saving ? "Saving…" : "Save entry"}
-        </button>
+
+        <div className="journal__footer">
+          <div className="journal__footer-left">
+            <MicButton onTranscribed={onTranscribed} disabled={j.saving} />
+            <span className="journal__autosave">
+              {autosaveLabel(j.draft, j.draftSavedAt)}
+            </span>
+          </div>
+          <button
+            className="btn btn--primary btn--md"
+            onClick={j.save}
+            disabled={!canSave}
+          >
+            {j.saving ? "Saving…" : "Save entry"}
+          </button>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
-/** Entries already written today, shown read-only above the editor. */
-function EarlierToday({ entries }: { entries: DayEntry[] }) {
+/* --- Entry: one post, read-only ------------------------------------------- */
+
+function EntryView({ journal: j }: { journal: UseJournal }) {
+  const d = j.entryDetail;
+  const editRef = useRef<JournalEditorHandle>(null);
+  const [imgError, setImgError] = useState<string | null>(null);
+
+  // When edit mode opens, drop the cursor into the editor ready to type.
+  useEffect(() => {
+    if (j.editing && !j.savingEdit) editRef.current?.focus();
+  }, [j.editing, j.savingEdit]);
+
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Cmd/Ctrl+Enter saves the edit; Esc cancels — same long-form ergonomics.
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      j.saveEdit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      j.cancelEdit();
+    }
+  };
+
+  const canSaveEdit = j.editDraft.trim().length > 0 && !j.savingEdit;
+
   return (
-    <div className="journal__earlier">
-      <p className="journal__earlier-head">Earlier today</p>
-      {entries.map((e, i) => (
-        <article className="journal__entry" key={e.id ?? i}>
-          <p className="journal__entry-time">{shortTime(e.time)}</p>
-          <p className="journal__entry-text">{e.text}</p>
-        </article>
-      ))}
-    </div>
+    <section className="journal__main">
+      <div className="journal__editor" onKeyDown={j.editing ? onKeyDown : undefined}>
+        <div className="journal__editor-scroll">
+          <div className="journal__dayhead">
+            <button
+              className="btn btn--ghost btn--sm"
+              onClick={j.editing ? j.cancelEdit : j.openIndex}
+            >
+              ← {j.editing ? "Cancel edit" : "All entries"}
+            </button>
+            <h2 className="journal__prompt">
+              {d
+                ? `${formatDate(d.date, j.today)} · ${timeFromCreated(d.created_at)}`
+                : "Entry"}
+            </h2>
+            {/* Edit affordance — only on a loaded post, hidden while editing. */}
+            {d && !j.editing && (
+              <button
+                className="btn btn--ghost btn--sm journal__edit-btn"
+                onClick={j.startEdit}
+              >
+                <Icon name="feather" size={15} /> Edit
+              </button>
+            )}
+          </div>
+
+          {j.entryLoading ? (
+            <p className="journal__saved-note">Opening…</p>
+          ) : !d ? (
+            <p className="journal__saved-note">This entry could not be found.</p>
+          ) : j.editing ? (
+            <>
+              <JournalEditor
+                ref={editRef}
+                editable
+                value={j.editDraft}
+                onChange={(md) => j.setEditDraft(md)}
+                onUploadError={setImgError}
+              />
+              {imgError && <p className="journal__error">{imgError}</p>}
+              {j.editError && <p className="journal__error">{j.editError}</p>}
+            </>
+          ) : (
+            <JournalEditor editable={false} value={toDisplayMarkdown(d.text)} />
+          )}
+
+          {!j.editing && <Acknowledgment ack={j.ack} />}
+        </div>
+
+        <div className={`journal__footer${j.editing ? "" : " journal__footer--end"}`}>
+          {j.editing ? (
+            <>
+              <div className="journal__footer-left">
+                <MicButton
+                  onTranscribed={(text) => editRef.current?.insertText(text)}
+                  disabled={j.savingEdit}
+                />
+                <span className="journal__autosave">
+                  Dictate or type — saved when you press Save changes.
+                </span>
+              </div>
+              <div className="journal__footer-actions">
+                <button className="btn btn--ghost btn--md" onClick={j.cancelEdit}>
+                  Cancel
+                </button>
+                <button
+                  className="btn btn--primary btn--md"
+                  onClick={j.saveEdit}
+                  disabled={!canSaveEdit}
+                >
+                  {j.savingEdit ? "Saving…" : "Save changes"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <button className="btn btn--primary btn--md" onClick={j.openCompose}>
+              <Icon name="feather" size={16} /> New entry
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -201,43 +367,26 @@ function Acknowledgment({ ack }: { ack: AckState }) {
   );
 }
 
-/* --- Right pane: a past day, read-only ------------------------------------ */
+/* --- Inline glyphs for the layout toggle ---------------------------------- */
 
-function DayView({
-  date,
-  entries,
-  loading,
-  onBack,
-}: {
-  date: string;
-  entries: DayEntry[];
-  loading: boolean;
-  onBack: () => void;
-}) {
+function GridGlyph() {
   return (
-    <div className="journal__editor">
-      <div className="journal__editor-scroll">
-        <div className="journal__dayhead">
-          <button className="btn btn--ghost btn--sm" onClick={onBack}>
-            ← Today
-          </button>
-          <h2 className="journal__prompt">{formatDate(date, "")}</h2>
-        </div>
+    <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true" fill="currentColor">
+      <rect x="0" y="0" width="6.5" height="6.5" rx="1.5" />
+      <rect x="8.5" y="0" width="6.5" height="6.5" rx="1.5" />
+      <rect x="0" y="8.5" width="6.5" height="6.5" rx="1.5" />
+      <rect x="8.5" y="8.5" width="6.5" height="6.5" rx="1.5" />
+    </svg>
+  );
+}
 
-        {loading ? (
-          <p className="journal__saved-note">Opening that day…</p>
-        ) : entries.length === 0 ? (
-          <p className="journal__saved-note">Nothing was written on this day.</p>
-        ) : (
-          entries.map((e, i) => (
-            <article className="journal__entry" key={e.id ?? i}>
-              <p className="journal__entry-time">{shortTime(e.time)}</p>
-              <p className="journal__entry-text">{e.text}</p>
-            </article>
-          ))
-        )}
-      </div>
-    </div>
+function ListGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true" fill="currentColor">
+      <rect x="0" y="1" width="15" height="2.5" rx="1.25" />
+      <rect x="0" y="6.25" width="15" height="2.5" rx="1.25" />
+      <rect x="0" y="11.5" width="15" height="2.5" rx="1.25" />
+    </svg>
   );
 }
 
@@ -265,6 +414,12 @@ function formatDate(date: string, today: string): string {
   const base = `${WEEKDAYS[dt.getDay()]}, ${MONTHS[m - 1]} ${d}`;
   const nowYear = today ? Number(today.slice(0, 4)) : y;
   return y === nowYear ? base : `${base}, ${y}`;
+}
+
+/** Pull "9:14 AM" out of an ISO "YYYY-MM-DDTHH:MM:SS" timestamp. */
+function timeFromCreated(created: string): string {
+  const t = created.includes("T") ? created.split("T")[1] : "";
+  return t ? shortTime(t) : "";
 }
 
 /** "09:14:03" → "9:14 AM". */

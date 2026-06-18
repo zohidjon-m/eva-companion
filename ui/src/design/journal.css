@@ -1,102 +1,182 @@
 /* =============================================================================
    Eva — Journaling surface (Phase 5)
-   A two-pane ritual: a left rail of past days and a calm full-height editor.
+   A stream of discrete posts: a flat history (grid or list) of past entries, a
+   calm full-height compose screen, and a read-only single-post view.
    All values are tokens. Renders flush (the shell gives it the whole column).
    ========================================================================== */
 
 .journal {
-  display: grid;
-  grid-template-columns: 288px 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
 }
 
-/* --- Left rail: browse past days ------------------------------------------ */
-.journal__aside {
-  display: flex;
-  flex-direction: column;
+/* --- History index: the landing view -------------------------------------- */
+.jhist {
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-5) var(--space-4);
-  border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface) 50%, transparent);
-}
-.journal__aside-head {
-  font-family: var(--font-display);
-  font-size: var(--text-md);
-  color: var(--text);
-  padding: 0 var(--space-2) var(--space-3);
-}
-.journal__aside-label {
-  margin-top: var(--space-4);
-  padding: 0 var(--space-2) var(--space-2);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-caps);
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-.journal__days {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-.journal__aside-empty {
-  padding: var(--space-3) var(--space-2);
-  font-size: var(--text-sm);
-  line-height: var(--leading-snug);
-  color: var(--text-muted);
-}
-
-/* One day button in the rail. */
-.jday {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
   width: 100%;
-  padding: var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  text-align: left;
-  transition:
-    background-color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
+  max-width: 920px;
+  margin: 0 auto;
+  padding: var(--space-7) var(--space-6) var(--space-6);
 }
-.jday:hover {
-  background: var(--surface-hover);
-}
-.jday--active {
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
-}
-.jday--today {
-  margin-bottom: var(--space-1);
-}
-.jday__date {
+.jhist__bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+.jhist__title {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-normal);
+  color: var(--text);
+}
+.jhist__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* Grid/list segmented toggle. */
+.jtoggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+.jtoggle__btn {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.jtoggle__btn:hover {
+  color: var(--text-secondary);
+}
+.jtoggle__btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-contrast);
+}
+
+/* Grid of cards. */
+.jhist__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--space-4);
+}
+
+/* A gentle staggered entrance for the history list — the first several items
+   ripple in, the rest share the last delay. Reuses the `rise` keyframes; the
+   global prefers-reduced-motion guard zeroes this out for those who opt out. */
+.jhist__grid .jcard,
+.jhist__list .jrow {
+  animation: rise var(--dur-base) var(--ease-out) both;
+}
+.jhist__grid .jcard:nth-child(1), .jhist__list .jrow:nth-child(1) { animation-delay: 20ms; }
+.jhist__grid .jcard:nth-child(2), .jhist__list .jrow:nth-child(2) { animation-delay: 55ms; }
+.jhist__grid .jcard:nth-child(3), .jhist__list .jrow:nth-child(3) { animation-delay: 90ms; }
+.jhist__grid .jcard:nth-child(4), .jhist__list .jrow:nth-child(4) { animation-delay: 125ms; }
+.jhist__grid .jcard:nth-child(5), .jhist__list .jrow:nth-child(5) { animation-delay: 160ms; }
+.jhist__grid .jcard:nth-child(6), .jhist__list .jrow:nth-child(6) { animation-delay: 195ms; }
+.jhist__grid .jcard:nth-child(n + 7), .jhist__list .jrow:nth-child(n + 7) { animation-delay: 220ms; }
+
+.jcard {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
+  min-height: 150px;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.jcard:hover {
+  background: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
+}
+.jcard:active {
+  transform: translateY(0);
+}
+.jcard__date {
   font-size: var(--text-base);
   font-weight: var(--weight-medium);
   color: var(--text);
 }
-.jday--active .jday__date {
-  color: var(--accent-contrast);
-}
-.jday__count {
-  display: inline-grid;
-  place-items: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent-contrast);
+.jcard__time {
   font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  color: var(--text-muted);
 }
-.jday__preview {
+.jcard__preview {
+  flex: 1;
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  -webkit-box-orient: vertical;
+}
+.jcard__meta {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* List of rows (chat-history style). */
+.jhist__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.jrow {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.jrow:hover {
+  background: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+.jrow__date {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text);
+}
+.jrow__preview {
   font-size: var(--text-sm);
   line-height: var(--leading-snug);
   color: var(--text-muted);
@@ -105,8 +185,36 @@
   white-space: nowrap;
 }
 
+/* Empty + loading. */
+.jhist__empty {
+  padding: var(--space-4) 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.jhist__empty-state {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-7) var(--space-4);
+  text-align: center;
+}
+.jhist__empty-title {
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  color: var(--text);
+}
+.jhist__empty-sub {
+  max-width: 360px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--text-muted);
+}
+
 /* --- Right pane: editor / day view ---------------------------------------- */
 .journal__main {
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -177,6 +285,19 @@
   background: color-mix(in srgb, var(--surface) 70%, transparent);
   backdrop-filter: blur(8px);
 }
+.journal__footer--end {
+  justify-content: flex-end;
+}
+.journal__footer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.journal__footer-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
 .journal__autosave {
   font-size: var(--text-xs);
   color: var(--text-muted);
@@ -242,6 +363,10 @@
 .journal__dayhead .journal__prompt {
   margin-bottom: 0;
 }
+/* Push the Edit affordance to the far right of the entry header. */
+.journal__edit-btn {
+  margin-left: auto;
+}
 .journal__entry {
   padding: var(--space-4) 0;
   border-bottom: 1px solid var(--border);
@@ -264,17 +389,215 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* A single post opened from the history reads as full body text, no divider. */
+.journal__entry--full {
+  padding-top: 0;
+  border-bottom: none;
+}
+.journal__entry--full .journal__entry-text {
+  font-size: var(--text-md);
+  color: var(--text);
+}
 
-/* --- Responsive: stack the rail above the editor in a small window -------- */
+/* =============================================================================
+   Rich editor (TipTap) — Medium-style writing surface, serialised to Markdown.
+   ========================================================================== */
+.jeditor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.jeditor__content {
+  flex: 1;
+  min-height: 240px;
+  outline: none;
+  border-radius: var(--radius-sm);
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  color: var(--text);
+}
+.jeditor__content:focus {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.jeditor__content > * + * {
+  margin-top: var(--space-3);
+}
+/* Placeholder on the empty first line. */
+.jeditor__content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Block elements. */
+.jeditor__content h1 {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+  margin-top: var(--space-5);
+}
+.jeditor__content h2 {
+  font-family: var(--font-display);
+  font-size: var(--text-lg, var(--text-md));
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+  margin-top: var(--space-4);
+}
+.jeditor__content blockquote {
+  margin-left: 0;
+  padding-left: var(--space-4);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.jeditor__content ul,
+.jeditor__content ol {
+  padding-left: var(--space-5);
+}
+.jeditor__content li {
+  margin: 2px 0;
+}
+.jeditor__content li > p {
+  margin: 0;
+}
+.jeditor__content a {
+  color: var(--accent-contrast);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.jeditor__content code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  border: 1px solid var(--border);
+}
+.jeditor__content pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken, color-mix(in srgb, var(--surface) 80%, transparent));
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: pre;
+}
+.jeditor__content pre code {
+  padding: 0;
+  border: none;
+  background: none;
+}
+.jeditor__content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: var(--space-5) 0;
+}
+
+/* Image figure + caption. */
+.jimg {
+  margin: var(--space-4) 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+.jimg--selected .jimg__img {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.jimg__img {
+  max-width: 100%;
+  max-height: 460px;
+  border-radius: var(--radius-md);
+  display: block;
+}
+.jimg__caption-input,
+.jimg__caption {
+  width: 100%;
+  max-width: 540px;
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-style: italic;
+}
+.jimg__caption-input {
+  border: none;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.jimg__caption-input:focus {
+  border-bottom-color: var(--accent);
+}
+.jimg__caption-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+/* Bubble + floating menus (the Medium-style toolbars). */
+.jmenu {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised, var(--bg-tint, var(--surface)));
+  border: 1px solid var(--border-strong, var(--border));
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(0, 0, 0, 0.18));
+}
+.jmenu--floating {
+  flex-wrap: wrap;
+  max-width: 320px;
+}
+.jmenu__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.jmenu__btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.jmenu__btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-contrast);
+}
+.jmenu__sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--border);
+}
+
+/* --- Responsive: tighten padding in a small window ------------------------ */
 @media (max-width: 720px) {
-  .journal {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
+  .jhist {
+    padding: var(--space-5) var(--space-4) var(--space-4);
   }
-  .journal__aside {
-    max-height: 34vh;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
+  .jhist__grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   }
   .journal__editor-scroll {
     padding: var(--space-5) var(--space-4) var(--space-4);
