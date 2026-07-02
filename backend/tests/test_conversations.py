@@ -33,8 +33,8 @@ def ctx(tmp_path, monkeypatch):
 
     from app import app
     from llm import client as llm_client
-    from llm import server as llm_server
     from memory import capture, retrieval
+    from support import stub_chat_provider_ready
 
     async def fake_stream(messages, **kwargs):
         for piece in ["I hear ", "you."]:
@@ -49,7 +49,7 @@ def ctx(tmp_path, monkeypatch):
     async def fake_extract(*a, **k):
         return "done"
 
-    monkeypatch.setattr(llm_server, "model_present", lambda: True)
+    stub_chat_provider_ready(monkeypatch)
     monkeypatch.setattr(llm_client, "stream_chat", fake_stream)
     monkeypatch.setattr(capture, "capture_entry", fake_capture)
     monkeypatch.setattr(capture, "run_extraction_and_embed", fake_extract)
@@ -62,6 +62,8 @@ def _drain(ws):
     """Read one reply (start..done), tolerating citations/memory frames."""
     while True:
         frame = ws.receive_json()
+        if frame["type"] == "error":
+            raise AssertionError(f"unexpected chat error: {frame}")
         if frame["type"] == "done":
             return
 

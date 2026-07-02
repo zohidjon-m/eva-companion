@@ -31,7 +31,7 @@ def test_save_creates_day_file_with_frontmatter(vault):
 
     path = vault.day_file("2026-06-16")
     assert path.exists()
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert text.startswith("---\n")
 
     fm = yaml.safe_load(text.split("---\n")[1])
@@ -52,7 +52,7 @@ def test_multiple_turns_same_day_append_only(vault):
     r2 = vault.save_entry("second message", "chat", when=when.replace(minute=5))
     r3 = vault.save_entry("a journal entry", "journal", when=when.replace(minute=10))
 
-    text = vault.day_file("2026-06-16").read_text()
+    text = vault.day_file("2026-06-16").read_text(encoding="utf-8")
     # Exactly one frontmatter / one day heading.
     assert text.count("---\n") == 2  # opening and closing fence of the single block
     assert text.count("# 2026-06-16\n") == 1

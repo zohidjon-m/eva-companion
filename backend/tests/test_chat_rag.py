@@ -15,8 +15,8 @@ from fastapi.testclient import TestClient
 from app import app
 from intent import classifier as intent_classifier
 from llm import client as llm_client
-from llm import server as llm_server
 from memory import capture, conversations, retrieval
+from support import stub_chat_provider_ready
 
 
 def _setup(monkeypatch, recorder, *, passages):
@@ -32,7 +32,7 @@ def _setup(monkeypatch, recorder, *, passages):
             if piece:
                 yield piece
 
-    monkeypatch.setattr(llm_server, "model_present", lambda: True)
+    stub_chat_provider_ready(monkeypatch)
     monkeypatch.setattr(llm_client, "stream_chat", fake_stream)
 
     def fake_capture(text, entry_type):
@@ -68,11 +68,16 @@ def _setup(monkeypatch, recorder, *, passages):
 
 def _drain(ws):
     """Read one reply; return (joined_text, citations_frame_or_None)."""
-    assert ws.receive_json() == {"type": "start"}
+    frame = ws.receive_json()
+    if frame["type"] == "error":
+        raise AssertionError(f"unexpected chat error: {frame}")
+    assert frame == {"type": "start"}
     citations = None
     out = []
     while True:
         frame = ws.receive_json()
+        if frame["type"] == "error":
+            raise AssertionError(f"unexpected chat error: {frame}")
         if frame["type"] == "done":
             break
         if frame["type"] == "citations":
@@ -148,11 +153,16 @@ def test_question_with_no_match_cites_nothing(monkeypatch):
 
 def _drain_with_memory(ws):
     """Read one reply; return (text, citations_frame_or_None, memory_frame_or_None)."""
-    assert ws.receive_json() == {"type": "start"}
+    frame = ws.receive_json()
+    if frame["type"] == "error":
+        raise AssertionError(f"unexpected chat error: {frame}")
+    assert frame == {"type": "start"}
     citations = memories = None
     out = []
     while True:
         frame = ws.receive_json()
+        if frame["type"] == "error":
+            raise AssertionError(f"unexpected chat error: {frame}")
         if frame["type"] == "done":
             break
         if frame["type"] == "citations":

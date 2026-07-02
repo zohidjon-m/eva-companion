@@ -13,10 +13,13 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
-from app import app
+import app as app_mod
 from llm import client as llm_client
 from llm import server as llm_server
 from memory import capture, retrieval
+from support import force_local_llamacpp_provider, stub_chat_provider_ready
+
+app = app_mod.app
 
 
 def _stub_capture(monkeypatch):
@@ -51,7 +54,7 @@ def _stub_capture(monkeypatch):
 # ── server: launch command & status ─────────────────────────────────────────
 def test_binary_command_has_translated_flags():
     # The preferred launcher: native llama-server with the binary's flag names.
-    cmd = llm_server.binary_command("/opt/homebrew/bin/llama-server")
+    cmd = llm_server.binary_command("/opt/homebrew/bin/llama-server", profile="mac-metal")
     assert cmd[0] == "/opt/homebrew/bin/llama-server"
     assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"     # all layers on Metal
     assert cmd[cmd.index("--ctx-size") + 1] == "8192"
@@ -89,7 +92,7 @@ def test_model_status_missing_includes_download_hint(monkeypatch):
     monkeypatch.setattr(llm_server, "model_present", lambda: False)
     status = llm_server.model_status()
     assert status["model_present"] is False
-    assert "download_model_mac.sh" in status["hint"]
+    assert "download_model.py" in status["hint"]
     assert status["endpoint"].endswith(":11500")
 
 
@@ -186,17 +189,22 @@ def test_ws_chat_streams_tokens(monkeypatch):
         for piece in ["Hello", ", ", "there!"]:
             yield piece
 
-    monkeypatch.setattr(llm_server, "model_present", lambda: True)
+    stub_chat_provider_ready(monkeypatch)
     monkeypatch.setattr(llm_client, "stream_chat", fake_stream)
     captured = _stub_capture(monkeypatch)
 
     client = TestClient(app)
     with client.websocket_connect("/chat") as ws:
         ws.send_text("hi")
-        assert ws.receive_json() == {"type": "start"}
+        frame = ws.receive_json()
+        if frame["type"] == "error":
+            raise AssertionError(f"unexpected chat error: {frame}")
+        assert frame == {"type": "start"}
         tokens = []
         while True:
             frame = ws.receive_json()
+            if frame["type"] == "error":
+                raise AssertionError(f"unexpected chat error: {frame}")
             if frame["type"] == "done":
                 break
             assert frame["type"] == "token"
@@ -207,6 +215,7 @@ def test_ws_chat_streams_tokens(monkeypatch):
 
 
 def test_ws_chat_reports_missing_model(monkeypatch):
+    force_local_llamacpp_provider(monkeypatch)
     monkeypatch.setattr(llm_server, "model_present", lambda: False)
     captured = _stub_capture(monkeypatch)
     client = TestClient(app)
@@ -216,4 +225,21 @@ def test_ws_chat_reports_missing_model(monkeypatch):
     assert frame["type"] == "error"
     assert frame["code"] == "model_missing"
     # An absent model must never cost the entry: capture ran before the check.
+    assert captured == ["hi"]
+
+
+def test_ws_chat_reports_missing_runtime(monkeypatch):
+    force_local_llamacpp_provider(monkeypatch)
+    monkeypatch.setattr(llm_server, "model_present", lambda: True)
+    monkeypatch.setattr(llm_server, "resolve_llama_server", lambda: None)
+    monkeypatch.setattr(app_mod._llama, "is_running", lambda: False)
+    monkeypatch.setattr(app_mod._llama, "start", lambda: False)
+    captured = _stub_capture(monkeypatch)
+
+    client = TestClient(app)
+    with client.websocket_connect("/chat") as ws:
+        ws.send_text("hi")
+        frame = ws.receive_json()
+    assert frame["type"] == "error"
+    assert frame["code"] == "runtime_missing"
     assert captured == ["hi"]

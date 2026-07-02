@@ -133,11 +133,17 @@ recording"*, confirm `faster-whisper` actually installed:
 ## Tests & checks
 
 ```sh
-# backend unit tests (health shape + network guard)
-cd backend && source .venv/bin/activate && python -m pytest -q
+# backend unit tests (POSIX)
+cd backend && source .venv/bin/activate && python -m pytest -q --basetemp ../.pytest-tmp
+
+# backend unit tests (Windows PowerShell)
+cd backend; .\.venv\Scripts\python.exe -m pytest -q --basetemp ..\.pytest-tmp
 
 # manual privacy check: loopback allowed, the open web blocked
 python ../scripts/check_net_guard.py
+
+# frontend build (requires Node/npm and installed ui/node_modules)
+cd ui && npm ci && npm run build
 
 # packaging spike: freeze a FastAPI sidecar and prove it serves HTTP
 PYTHON=backend/.venv/bin/python bash packaging/spike/build_spike.sh
