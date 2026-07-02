@@ -29,4 +29,4 @@ def test_health_reports_download_hint_when_model_missing(monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["model_present"] is False
-    assert "download_model_mac.sh" in body["model"]["hint"]
+    assert "download_model.py" in body["model"]["hint"]

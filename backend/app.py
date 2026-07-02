@@ -22,6 +22,7 @@ import re
 import threading
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import (
@@ -65,6 +66,8 @@ from memory import retrieval
 
 # Phase 1 LLM runtime: the model-server supervisor and the async client.
 from llm import client as llm_client
+from llm import download as llm_download
+from llm import providers as llm_providers
 from llm import server as llm_server
 
 # Phase 4 chat surface: prompt assembly (the four template slots) + the interim
@@ -141,6 +144,8 @@ async def _warm_model_persona() -> None:
     any failure (model still loading, request error) just leaves the first turn to
     warm the cache itself, exactly as before.
     """
+    if llm_providers.selected_provider_id() != llm_providers.LOCAL_LLAMA_CPP:
+        return
     try:
         if not await _llama.wait_ready():
             return
@@ -165,6 +170,15 @@ def _autostart_enabled() -> bool:
     return os.environ.get("EVA_START_LLAMA", "").strip().lower() in {"1", "true", "yes"}
 
 
+def _ensure_local_llama_running() -> None:
+    """Start the local llama.cpp server on demand when that provider is selected."""
+    if llm_providers.selected_provider_id() != llm_providers.LOCAL_LLAMA_CPP:
+        return
+    if _llama.is_running() or not llm_server.model_present():
+        return
+    _llama.start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start/stop the model server alongside the backend (when autostart is on).
@@ -175,7 +189,7 @@ async def lifespan(app: FastAPI):
     never crashes startup — :meth:`LlamaServer.start` returns ``False`` gracefully.
     """
     global _supervisor_task
-    if _autostart_enabled():
+    if _autostart_enabled() and llm_providers.selected_provider_id() == llm_providers.LOCAL_LLAMA_CPP:
         if _llama.start():
             # Warm the persona prompt cache once the server is ready (awaits
             # readiness internally), so the user's first chat turn isn't cold.
@@ -224,15 +238,135 @@ def health() -> dict:
     cached, so the Phase-10 first-run setup screen can show a live "ready ✓".
     """
     status = llm_server.model_status()
+    ai_config = llm_providers.public_config()
+    ai_reachable = (
+        _llama.is_running()
+        if ai_config["ai_provider_id"] == llm_providers.LOCAL_LLAMA_CPP
+        else ai_config["configured"]
+    )
     return {
         "status": "ok",
         "model_present": status["model_present"],
         "model": status,
         "model_server_running": _llama.is_running(),
+        "ai": {
+            **ai_config,
+            "provider_reachable": ai_reachable,
+            "local_download": llm_download.status(),
+            "local_llama_server_running": _llama.is_running(),
+            "provider_error": None if ai_config["configured"] else "provider_not_configured",
+        },
         "net_guard": is_installed(),
         "net_guard_detail": allow_summary(),
         "voices": {"stt": stt.weights_present(), "tts": tts.weights_present()},
     }
+
+
+class AiConfigPatch(BaseModel):
+    """Partial non-secret AI provider configuration update."""
+
+    ai_provider_id: str | None = None
+    ai_mode: str | None = None
+    api_base_url: str | None = None
+    api_model: str | None = None
+    local_endpoint: str | None = None
+    local_model_path: str | None = None
+    local_runtime: str | None = None
+
+
+class AiSecretSession(BaseModel):
+    """API key supplied from secure UI storage for this backend process."""
+
+    provider_id: str
+    api_key: str | None = None
+
+
+class LocalDownloadStart(BaseModel):
+    """Start options for the local Gemma model download."""
+
+    force: bool = False
+
+
+@app.get("/ai/providers")
+def ai_providers() -> dict:
+    """Return public metadata for all supported LLM providers."""
+    return {"providers": llm_providers.list_provider_metadata()}
+
+
+@app.get("/ai/config")
+def ai_config() -> dict:
+    """Return the selected AI provider config without any API key."""
+    return {"config": llm_providers.public_config()}
+
+
+@app.patch("/ai/config")
+def ai_config_patch(body: AiConfigPatch) -> dict:
+    """Persist non-secret AI provider settings.
+
+    API keys are intentionally excluded; the UI sends them separately from
+    Stronghold/secure storage through ``/ai/secret/session``.
+    """
+    patch = body.model_dump(exclude_none=True)
+    if patch:
+        provider_id = patch.get("ai_provider_id")
+        if provider_id in llm_providers.PROVIDER_IDS:
+            patch["ai_mode"] = llm_providers.provider_mode(str(provider_id))
+        try:
+            app_settings.update(patch)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"config": llm_providers.public_config()}
+
+
+@app.post("/ai/secret/session")
+def ai_secret_session(body: AiSecretSession) -> dict:
+    """Set or clear the in-memory API key for the current backend process."""
+    try:
+        llm_providers.set_session_api_key(body.provider_id, body.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "config": llm_providers.public_config()}
+
+
+@app.post("/ai/test")
+async def ai_test() -> dict:
+    """Test the selected provider and return a redacted status."""
+    _ensure_local_llama_running()
+    return {"status": asdict(await llm_client.provider_status())}
+
+
+@app.get("/ai/models")
+async def ai_models() -> dict:
+    """List models from the selected provider where the provider supports it."""
+    try:
+        models = await llm_providers.selected_provider().list_models()
+    except llm_providers.ProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"models": [asdict(m) for m in models]}
+
+
+@app.get("/ai/local/discover")
+async def ai_local_discover() -> dict:
+    """Probe common loopback OpenAI-compatible endpoints for local AI."""
+    return {"providers": await llm_providers.discover_local_openai_endpoints()}
+
+
+@app.post("/ai/local/download/start")
+def ai_local_download_start(body: LocalDownloadStart) -> dict:
+    """Start the app-managed Gemma model download."""
+    return {"download": llm_download.start(force=body.force)}
+
+
+@app.get("/ai/local/download/status")
+def ai_local_download_status() -> dict:
+    """Return the current local model download status."""
+    return {"download": llm_download.status()}
+
+
+@app.post("/ai/local/download/cancel")
+def ai_local_download_cancel() -> dict:
+    """Cancel an in-flight local model download if one is running."""
+    return {"download": llm_download.cancel()}
 
 
 def _parse_frame(raw: str) -> tuple[str, bool, bool, str | None, str]:
@@ -403,14 +537,29 @@ async def chat_ws(ws: WebSocket) -> None:
                 conversations.append_turn(conv_id, "user", text)
                 _capture_user_turn(text)
 
-            if not llm_server.model_present():
-                status = llm_server.model_status()
+            if not llm_client.provider_configured():
+                status = asdict(await llm_client.provider_status())
                 await emit(
                     {
                         "type": "error",
-                        "code": "model_missing",
-                        "message": status.get("hint", "model not available"),
-                        "model": status,
+                        "code": status.get("error") or "provider_not_configured",
+                        "message": status.get("message", "AI provider not configured."),
+                        "provider": status,
+                    }
+                )
+                continue
+            _ensure_local_llama_running()
+            if (
+                llm_providers.selected_provider_id() == llm_providers.LOCAL_LLAMA_CPP
+                and not _llama.is_running()
+            ):
+                status = asdict(await llm_client.provider_status())
+                await emit(
+                    {
+                        "type": "error",
+                        "code": status.get("error") or "provider_unavailable",
+                        "message": status.get("message", "Local AI runtime is not available."),
+                        "provider": status,
                     }
                 )
                 continue
@@ -940,7 +1089,7 @@ async def _journal_acknowledgment(entry_text: str) -> str | None:
     Gemma has no system role, so the instruction is folded into the user message
     exactly as the chat path does.
     """
-    if not llm_server.model_present():
+    if not llm_client.provider_configured():
         return None
     system_prompt = assembly.build_journal_ack_prompt()
     messages = [{"role": "user", "content": f"{system_prompt}\n\n{entry_text}"}]
@@ -1278,7 +1427,7 @@ def _settings_response(settings: dict) -> dict:
     Alongside the values: ``options`` (closed-set choices, for the whisper-size
     dropdown), ``ranges`` (numeric bounds, for the voice-speed slider), and
     ``vault_path`` (read-only display of where the user's data lives, with an
-    "open in Finder" affordance). Model status and voice-weight presence are read
+    "reveal in file manager" affordance). Model status and voice-weight presence are read
     from ``/health`` instead, so they are not duplicated here.
     """
     return {
@@ -1374,13 +1523,13 @@ def privacy_audit() -> dict:
 
 @app.post("/vault/reveal")
 def vault_reveal() -> dict:
-    """Open the vault directory in the OS file manager (macOS ``open``).
+    """Open the vault directory in the OS file manager.
 
     A convenience for the Settings "vault location" row so the user can see their
     own plain-Markdown data without hunting for the path. The path is fixed
     (:func:`memory.vault_dir`), never client-supplied, so there is nothing to
     inject. Returns the path either way; ``opened`` says whether the file manager
-    was launched (false on a non-macOS host or if the directory doesn't exist yet).
+    was launched.
     """
     import subprocess
     import sys
@@ -1388,13 +1537,17 @@ def vault_reveal() -> dict:
     path = vault_dir()
     if not path.exists():
         return {"path": str(path), "opened": False, "reason": "vault not created yet"}
-    if sys.platform != "darwin":
-        return {"path": str(path), "opened": False, "reason": "reveal is macOS-only"}
+    if sys.platform == "darwin":
+        cmd = ["open", str(path)]
+    elif sys.platform == "win32":
+        cmd = ["explorer", str(path)]
+    else:
+        cmd = ["xdg-open", str(path)]
     try:
-        subprocess.run(["open", str(path)], check=True, timeout=5)
+        subprocess.run(cmd, check=True, timeout=5)
     except (subprocess.SubprocessError, OSError) as exc:
         log.warning("vault reveal failed: %s", exc)
-        return {"path": str(path), "opened": False, "reason": "could not open Finder"}
+        return {"path": str(path), "opened": False, "reason": "could not open file manager"}
     return {"path": str(path), "opened": True}
 
 

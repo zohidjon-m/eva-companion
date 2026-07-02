@@ -5,7 +5,7 @@ supervised by the backend, so that if it dies the backend can restart it without
 taking down the UI.
 
 The model server is the native llama.cpp **``llama-server`` binary**
-(``brew install llama.cpp``). It serves the OpenAI-compatible API on :11500, so
+(``llama-server`` / ``llama-server.exe``). It serves the OpenAI-compatible API on :11500, so
 :mod:`llm.client` and the rest of the backend talk to it over plain HTTP (httpx)
 and never import a model library themselves. The binary is the single supported
 launcher — there is no ``python -m llama_cpp.server`` / ``llama-cpp-python``
@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -73,12 +74,23 @@ BASE_URL = f"http://{HOST}:{PORT}"
 N_CTX = 8192  # real-time chat budget; consolidation truncates client-side.
 
 # The first-run download is the ONLY permitted network call (CLAUDE.md rule 4).
-DOWNLOAD_CMD = "scripts/download_model_mac.sh"
+DOWNLOAD_CMD = "scripts/download_model.py"
 
 # Where to find the native llama.cpp server binary, in resolution order:
 # an explicit override, then PATH, then Homebrew's default location.
 LLAMA_SERVER_ENV = "EVA_LLAMA_SERVER_BIN"
 _HOMEBREW_LLAMA_SERVER = "/opt/homebrew/bin/llama-server"
+
+
+def configured_model_path() -> Path:
+    """Return the selected local GGUF path, falling back to the repo default."""
+    try:
+        import settings as app_settings
+
+        raw = str(app_settings.get("local_model_path") or "").strip()
+    except Exception:  # noqa: BLE001 - health must not fail on settings issues
+        raw = ""
+    return Path(raw).expanduser() if raw else MODEL_PATH
 
 
 def model_present() -> bool:
@@ -88,9 +100,21 @@ def model_present() -> bool:
     deciding whether the server can be launched at all.
     """
     try:
-        return MODEL_PATH.is_file() and MODEL_PATH.stat().st_size > 0
+        path = configured_model_path()
+        return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def _bundled_binary_candidates() -> list[Path]:
+    """Return likely bundled/dev llama-server binary locations for this OS."""
+    exe = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+    os_name = platform.system().lower()
+    return [
+        REPO_ROOT / "bin" / "llama.cpp" / os_name / exe,
+        REPO_ROOT / "ui" / "src-tauri" / "binaries" / exe,
+        REPO_ROOT / exe,
+    ]
 
 
 def resolve_llama_server() -> str | None:
@@ -104,24 +128,55 @@ def resolve_llama_server() -> str | None:
     override = os.environ.get(LLAMA_SERVER_ENV)
     if override and Path(override).is_file() and os.access(override, os.X_OK):
         return override
+    for candidate in _bundled_binary_candidates():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
     found = shutil.which("llama-server")
     if found:
         return found
+    if sys.platform == "win32":
+        found_exe = shutil.which("llama-server.exe")
+        if found_exe:
+            return found_exe
     if Path(_HOMEBREW_LLAMA_SERVER).is_file() and os.access(_HOMEBREW_LLAMA_SERVER, os.X_OK):
         return _HOMEBREW_LLAMA_SERVER
     return None
 
 
-def binary_command(binary: str) -> list[str]:
+def llama_profile() -> str:
+    """Return the llama.cpp launch profile for the current host."""
+    override = os.environ.get("EVA_LLAMA_PROFILE")
+    if override:
+        return override
+    if sys.platform == "darwin":
+        return "mac-metal"
+    if sys.platform == "win32":
+        return "win-cpu"
+    return "cpu"
+
+
+def binary_command(binary: str, *, profile: str | None = None) -> list[str]:
     """Build the native ``llama-server`` argv.
 
     Full Metal offload, 8192 context and a q8_0 KV cache. ``--jinja`` makes the
     server apply the GGUF's embedded gemma-4 chat template for
     ``/v1/chat/completions``; without it the binary would use a plain prompt format.
     """
+    selected = profile or llama_profile()
+    if selected != "mac-metal":
+        return [
+            binary,
+            "--model", str(configured_model_path()),
+            "--n-gpu-layers", "0",
+            "--ctx-size", str(N_CTX),
+            "--jinja",
+            "--reasoning", "off",
+            "--host", HOST,
+            "--port", str(PORT),
+        ]
     return [
         binary,
-        "--model", str(MODEL_PATH),
+        "--model", str(configured_model_path()),
         "--n-gpu-layers", "-1",        # offload ALL layers to the Metal GPU
         "--ctx-size", str(N_CTX),
         "--cache-type-k", "q8_0",      # q8_0 key cache
@@ -145,7 +200,7 @@ def launch_command() -> list[str] | None:
 
     Uses the native ``llama-server`` binary. ``None`` means the binary is not
     installed — the caller surfaces that via :func:`model_status` / a graceful
-    error (the fix is ``brew install llama.cpp``).
+    error (the fix is Eva's local AI setup or a manual llama.cpp install).
     """
     binary = resolve_llama_server()
     if binary is not None:
@@ -164,21 +219,21 @@ def model_status() -> dict:
     binary = resolve_llama_server()
     status: dict = {
         "model_present": present,
-        "model_path": str(MODEL_PATH),
+        "model_path": str(configured_model_path()),
         "endpoint": BASE_URL,
         # Which launcher the backend will use ("binary" or None).
         "launcher": "binary" if binary else None,
     }
     if not present:
         status["hint"] = (
-            f"Gemma GGUF not found at {MODEL_PATH}. "
+            f"Gemma GGUF not found at {configured_model_path()}. "
             f"Run `{DOWNLOAD_CMD}` to download it (the only permitted network call)."
         )
         return status
     if status["launcher"] is None:
         status["hint"] = (
             "Model file is present but the `llama-server` binary was not found. "
-            "Install it with `brew install llama.cpp`."
+            "Install llama.cpp or run Eva's local AI setup to download the bundled runtime."
         )
     return status
 
@@ -219,7 +274,7 @@ class LlamaServer:
         if cmd is None:
             log.error(
                 "llama server not started: `llama-server` binary not found "
-                "(install it with `brew install llama.cpp`)"
+                "(install llama.cpp or run Eva's local AI setup)"
             )
             return False
 
@@ -324,8 +379,8 @@ def _run_foreground() -> int:
     cmd = launch_command()
     if cmd is None:
         print(
-            "No `llama-server` binary found. Install it with "
-            "`brew install llama.cpp`.",
+            "No `llama-server` binary found. Install llama.cpp or run Eva's "
+            "local AI setup.",
             file=sys.stderr,
         )
         return 1

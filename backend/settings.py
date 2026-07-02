@@ -37,6 +37,19 @@ log = logging.getLogger("eva.settings")
 # accent (plan Phase 8). English-only models only, matching CLAUDE.md.
 WHISPER_SIZES = ("base.en", "small.en")
 
+# Generalized LLM provider choices. API keys are intentionally NOT settings:
+# the frontend restores them from secure storage and passes them to the backend
+# for the current process, while dev runs can use EVA_API_KEY.
+AI_PROVIDER_IDS = (
+    "local_llamacpp",
+    "local_openai_compatible",
+    "openai_compatible_api",
+    "anthropic",
+    "gemini",
+)
+AI_MODES = ("local", "online")
+LOCAL_RUNTIMES = ("llamacpp", "openai_compatible")
+
 # Kokoro speech-rate bounds (Phase 10 voice-out knob). 1.0 is Kokoro's natural
 # pace; below ~0.7 it drags and above ~1.3 it clips, so we keep the slider inside
 # a range that always sounds like Eva. voice/tts.py reads the value each synth.
@@ -55,12 +68,29 @@ DEFAULTS: dict[str, object] = {
     "voice_enabled": False,
     # Eva's speaking rate (Kokoro ``speed``). 1.0 = natural pace.
     "voice_speed": 1.0,
+    # Which LLM adapter Eva routes chat/extraction through. Local Gemma remains
+    # the privacy-first default; online providers are opt-in.
+    "ai_provider_id": "local_llamacpp",
+    "ai_mode": "local",
+    # Online provider config. These are not secrets; the API key is never stored
+    # in settings.json.
+    "api_base_url": "",
+    "api_model": "",
+    # Local provider config. ``local_endpoint`` is an OpenAI-compatible /v1 base
+    # URL such as http://127.0.0.1:1234/v1. ``local_model_path`` lets packaged
+    # builds point llama.cpp at a model outside the source tree.
+    "local_endpoint": "",
+    "local_model_path": "",
+    "local_runtime": "llamacpp",
 }
 
 # Keys whose value must be one of a fixed set. Checked on every write so readers
 # (e.g. voice/stt.py) never have to defend against a bad value from disk.
 ALLOWED: dict[str, tuple[str, ...]] = {
     "whisper_model_size": WHISPER_SIZES,
+    "ai_provider_id": AI_PROVIDER_IDS,
+    "ai_mode": AI_MODES,
+    "local_runtime": LOCAL_RUNTIMES,
 }
 
 # Keys whose value must be a number within an inclusive ``(min, max)`` range.
@@ -129,6 +159,8 @@ def _is_valid(key: str, value: object) -> bool:
         return lo <= float(value) <= hi
     if isinstance(DEFAULTS.get(key), bool):
         return isinstance(value, bool)
+    if key in {"api_base_url", "api_model", "local_endpoint", "local_model_path"}:
+        return isinstance(value, str)
     return True
 
 

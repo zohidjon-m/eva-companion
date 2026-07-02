@@ -39,6 +39,13 @@ def test_privacy_audit_clean_when_nothing_blocked():
 
 def test_privacy_audit_reports_a_blocked_attempt():
     net_guard.reset_violations()
+
+
+def test_runtime_allow_host_records_online_provider_host(monkeypatch):
+    """Online API mode can allow exactly the configured provider host."""
+    net_guard.set_runtime_allow_host("api.example.test")
+    summary = net_guard.allow_summary()
+    assert summary["allow_host"] == "api.example.test"
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.2)
     with pytest.raises(net_guard.OutboundBlocked):
@@ -53,7 +60,7 @@ def test_privacy_audit_reports_a_blocked_attempt():
 
 
 def test_vault_reveal_returns_the_path(tmp_path, monkeypatch):
-    """Reveal reports the vault path; it does not open Finder for a missing dir."""
+    """Reveal reports the vault path; it does not open a file manager for a missing dir."""
     monkeypatch.setenv("EVA_VAULT_DIR", str(tmp_path / "nope"))
     body = client.post("/vault/reveal").json()
     assert body["path"].endswith("nope")
