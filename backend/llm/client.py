@@ -28,7 +28,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from llm import server
+from llm import providers, server
 
 log = logging.getLogger("eva.llm.client")
 
@@ -160,10 +160,7 @@ async def stream_chat(
     Raises on transport/server errors (e.g. the server is down) so the caller —
     the ``/chat`` WebSocket — can surface a graceful error to the UI.
     """
-    import httpx
-
-    payload = _build_payload(
-        messages,
+    options = providers.ChatOptions(
         max_tokens=max_tokens,
         temperature=temp,
         top_p=top_p,
@@ -172,25 +169,9 @@ async def stream_chat(
         stream=True,
     )
     async with _model_access(priority):
-        async with httpx.AsyncClient(timeout=_timeout()) as client:
-            async with client.stream("POST", CHAT_URL, json=payload) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[len("data:"):].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        obj = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue  # skip keep-alive / malformed frames
-                    choices = obj.get("choices") or []
-                    if not choices:
-                        continue
-                    piece = (choices[0].get("delta") or {}).get("content")
-                    if piece:
-                        yield _strip_leaks(piece)
+        async for piece in providers.selected_provider().stream_chat(messages, options):
+            if piece:
+                yield _strip_leaks(piece)
 
 
 async def complete_chat(
@@ -210,10 +191,7 @@ async def complete_chat(
     real-time chat turns. Same lock and endpoint as :func:`stream_chat`, so there
     is exactly one model-access path.
     """
-    import httpx
-
-    payload = _build_payload(
-        messages,
+    options = providers.ChatOptions(
         max_tokens=max_tokens,
         temperature=temp,
         top_p=top_p,
@@ -222,8 +200,15 @@ async def complete_chat(
         stream=False,
     )
     async with _model_access(priority):
-        async with httpx.AsyncClient(timeout=_timeout()) as client:
-            resp = await client.post(CHAT_URL, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-    return _strip_leaks(data["choices"][0]["message"]["content"])
+        text = await providers.selected_provider().complete_chat(messages, options)
+    return _strip_leaks(text)
+
+
+def provider_configured() -> bool:
+    """Return whether the selected AI provider has enough config to be used."""
+    return providers.is_configured()
+
+
+async def provider_status() -> providers.ProviderStatus:
+    """Return the selected AI provider's redacted readiness status."""
+    return await providers.selected_provider_status()

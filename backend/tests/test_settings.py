@@ -28,6 +28,9 @@ def test_defaults_when_no_file(store):
     # Phase 10 voice knobs default to off / natural pace.
     assert s["voice_enabled"] is False
     assert s["voice_speed"] == 1.0
+    assert s["ai_provider_id"] == "local_llamacpp"
+    assert s["ai_mode"] == "local"
+    assert "api_key" not in s
 
 
 def test_voice_enabled_round_trip(store):
@@ -70,6 +73,19 @@ def test_update_round_trip_persists(store):
     assert store.get("whisper_model_size") == "small.en"
     on_disk = json.loads(store._settings_path().read_text())
     assert on_disk["whisper_model_size"] == "small.en"
+
+
+def test_ai_provider_config_persists_without_secret(store):
+    updated = store.update({
+        "ai_provider_id": "openai_compatible_api",
+        "ai_mode": "online",
+        "api_base_url": "https://api.example.test/v1",
+        "api_model": "example-model",
+    })
+    assert updated["ai_provider_id"] == "openai_compatible_api"
+    on_disk = json.loads(store._settings_path().read_text())
+    assert on_disk["api_base_url"] == "https://api.example.test/v1"
+    assert "api_key" not in on_disk
 
 
 def test_update_rejects_unknown_key(store):

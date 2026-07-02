@@ -175,6 +175,30 @@ def install_net_guard() -> None:
     )
 
 
+def set_runtime_allow_host(host: str | None) -> None:
+    """Allow one explicit runtime host, used only by opt-in online AI mode.
+
+    Local/offline mode still blocks everything except loopback. When a user
+    chooses an online API provider, the provider adapter calls this with the
+    configured host immediately before its request so the guard allows that one
+    destination and continues to block everything else.
+    """
+    global _allow_name, _allow_ips
+    if not host:
+        return
+    _allow_name = host
+    _allow_ips = set()
+    try:
+        for info in _orig_getaddrinfo(_allow_name, None):
+            _allow_ips.add(info[4][0])
+    except OSError as exc:
+        log.warning(
+            "net_guard: could not pre-resolve runtime allow host %s (%s); allowing by name only",
+            _allow_name,
+            exc,
+        )
+
+
 def is_installed() -> bool:
     """Return whether the guard is currently active. Used by /health and tests."""
     return _installed
