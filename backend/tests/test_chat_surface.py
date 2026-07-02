@@ -12,9 +12,9 @@ from fastapi.testclient import TestClient
 
 from app import app
 from llm import client as llm_client
-from llm import server as llm_server
 from memory import capture, conversations, retrieval
 from prompts import assembly
+from support import stub_chat_provider_ready
 
 
 def _setup(monkeypatch, recorder):
@@ -27,7 +27,7 @@ def _setup(monkeypatch, recorder):
             if piece:
                 yield piece
 
-    monkeypatch.setattr(llm_server, "model_present", lambda: True)
+    stub_chat_provider_ready(monkeypatch)
     monkeypatch.setattr(llm_client, "stream_chat", fake_stream)
 
     def fake_capture(text, entry_type):
@@ -56,10 +56,15 @@ def _setup(monkeypatch, recorder):
 
 def _drain(ws):
     """Read one full reply (start..done) and return the joined token text."""
-    assert ws.receive_json() == {"type": "start"}
+    frame = ws.receive_json()
+    if frame["type"] == "error":
+        raise AssertionError(f"unexpected chat error: {frame}")
+    assert frame == {"type": "start"}
     out = []
     while True:
         frame = ws.receive_json()
+        if frame["type"] == "error":
+            raise AssertionError(f"unexpected chat error: {frame}")
         if frame["type"] == "done":
             break
         assert frame["type"] == "token"
