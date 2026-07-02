@@ -83,7 +83,7 @@ export function AppShell() {
   // connecting tick (which would flash the wizard), and not if the user chose to
   // look around without it. The moment the model is detected, the shell returns.
   const needsSetup =
-    health.conn === "online" && !health.modelPresent && !exploreWithoutModel;
+    health.conn === "online" && !health.ai.configured && !exploreWithoutModel;
   if (needsSetup) {
     return (
       <FirstRunScreen

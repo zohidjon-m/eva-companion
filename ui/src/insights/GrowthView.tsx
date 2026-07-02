@@ -52,7 +52,7 @@ export function GrowthView() {
 
       {error ? (
         <p className="insights__note insights__note--error">
-          Couldn't reach the journal just now. It's all still on this Mac — try again
+          Couldn't reach the journal just now. It's all still on this computer — try again
           in a moment.
         </p>
       ) : !loaded ? (

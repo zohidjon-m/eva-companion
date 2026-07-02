@@ -69,7 +69,7 @@ function DropZone({ lib }: { lib: UseLibrary }) {
       </p>
       <p className="library__drop-hint">
         Drag a file here, or click to browse. PDF, Markdown, or text — it stays on
-        this Mac.
+        this computer.
       </p>
       <input
         ref={inputRef}

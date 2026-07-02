@@ -37,11 +37,31 @@ export type ModelInfo = {
   hint: string | null;
 };
 
+export type AiHealth = {
+  ai_provider_id: string;
+  ai_mode: "local" | "online";
+  configured: boolean;
+  provider_reachable: boolean;
+  requires_api_key: boolean;
+  has_session_secret: boolean;
+  provider_error: string | null;
+  local_download?: {
+    state: string;
+    path: string;
+    bytes_downloaded: number;
+    total_bytes: number | null;
+    error: string | null;
+    model_present: boolean;
+  };
+  local_llama_server_running: boolean;
+};
+
 type HealthBody = {
   status: string;
   model_present: boolean;
   model?: { model_present: boolean; model_path: string; endpoint: string; hint?: string };
   model_server_running?: boolean;
+  ai?: AiHealth;
   net_guard: boolean;
   net_guard_detail?: { violations?: number };
   voices?: { stt: boolean; tts: boolean };
@@ -52,6 +72,7 @@ export type Health = {
   modelPresent: boolean;
   model: ModelInfo;
   modelServerRunning: boolean;
+  ai: AiHealth;
   voices: { stt: boolean; tts: boolean };
   /** Outbound network guard active (defaults true — the app's resting state). */
   netGuard: boolean;
@@ -64,6 +85,16 @@ const RESTING: Health = {
   modelPresent: false,
   model: { present: false, path: "", endpoint: "", hint: null },
   modelServerRunning: false,
+  ai: {
+    ai_provider_id: "local_llamacpp",
+    ai_mode: "local",
+    configured: false,
+    provider_reachable: false,
+    requires_api_key: false,
+    has_session_secret: false,
+    provider_error: null,
+    local_llama_server_running: false,
+  },
   voices: { stt: false, tts: false },
   netGuard: true,
   netGuardViolations: 0,
@@ -91,6 +122,7 @@ function useHealthPoll(): Health {
             hint: body.model?.hint ?? null,
           },
           modelServerRunning: body.model_server_running ?? false,
+          ai: body.ai ?? RESTING.ai,
           voices: { stt: body.voices?.stt ?? false, tts: body.voices?.tts ?? false },
           netGuard: body.net_guard,
           netGuardViolations: body.net_guard_detail?.violations ?? 0,
