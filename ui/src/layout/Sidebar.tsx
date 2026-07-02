@@ -75,7 +75,7 @@ export function Sidebar({ active, onSelect, collapsed, spin, onToggle }: Sidebar
       </nav>
 
       <div className="sidebar__foot">
-        <p className="sidebar__tag">Private by design. Everything stays on this Mac.</p>
+        <p className="sidebar__tag">Private by design. Everything stays on this computer.</p>
       </div>
     </aside>
   );

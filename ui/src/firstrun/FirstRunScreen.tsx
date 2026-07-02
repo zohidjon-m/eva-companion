@@ -1,22 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Badge, Button, Icon } from "../components";
 import { ThemeToggle } from "../layout/ThemeToggle";
+import {
+  discoverLocalAi,
+  fetchModelDownloadStatus,
+  patchAiConfig,
+  setSessionSecret,
+  startModelDownload,
+  testAiProvider,
+  type DownloadStatus,
+  type LocalDiscovery,
+} from "../settings/api";
 import type { Health } from "../useHealth";
 import type { Theme } from "../useTheme";
-
-/**
- * FirstRunScreen — the Phase 10 "wizard-lite" setup surface.
- *
- * Shown by the shell when the backend is up but the language model isn't on disk
- * yet, so a fresh clone meets clear, copyable instructions instead of a chat that
- * errors. It is deliberately *lite* (not the full old setup wizard): one required
- * step (the model) with a live "found ✓" check driven by the health poll, plus an
- * optional voice step. There is nothing to click to proceed — the instant the
- * model is detected the shell swaps this screen for the real app.
- *
- * Every command here is run by the user in their own terminal; the app issues no
- * downloads itself. The commands mirror the repo's setup scripts exactly.
- */
 
 type FirstRunProps = {
   health: Health;
@@ -25,14 +21,96 @@ type FirstRunProps = {
   onExplore: () => void;
 };
 
-// The exact setup commands (they mirror scripts/ in the repo). The model is
-// required for chat; voice is optional and degrades to text if absent.
-const MODEL_CMD = "bash scripts/download_model_mac.sh";
-const STT_CMD = "backend/.venv/bin/python scripts/download_whisper_model.py";
-const TTS_CMD = "backend/.venv/bin/python scripts/download_kokoro_model.py";
+type SetupMode = "local" | "online";
 
 export function FirstRunScreen({ health, theme, onToggleTheme, onExplore }: FirstRunProps) {
-  const voiceReady = health.voices.stt && health.voices.tts;
+  const [mode, setMode] = useState<SetupMode>(health.ai.ai_mode ?? "local");
+  const [localFound, setLocalFound] = useState<LocalDiscovery[]>([]);
+  const [download, setDownload] = useState<DownloadStatus | null>(
+    health.ai.local_download ?? null,
+  );
+  const [providerId, setProviderId] = useState("openai_compatible_api");
+  const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
+  const [model, setModel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (download?.state !== "downloading" && download?.state !== "starting") return;
+    const id = window.setInterval(() => {
+      fetchModelDownloadStatus().then(setDownload).catch(() => undefined);
+    }, 1500);
+    return () => window.clearInterval(id);
+  }, [download?.state]);
+
+  const chooseExistingLocal = async (item: LocalDiscovery) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await patchAiConfig({
+        ai_provider_id: "local_openai_compatible",
+        local_endpoint: item.base_url,
+        api_model: item.models[0]?.id ?? "",
+        local_runtime: "openai_compatible",
+      });
+      const status = await testAiProvider();
+      setMessage(status.message);
+    } catch {
+      setMessage("Could not save that local AI server.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const findLocal = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      setLocalFound(await discoverLocalAi());
+    } catch {
+      setMessage("Could not scan local AI endpoints.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const downloadLocal = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await patchAiConfig({ ai_provider_id: "local_llamacpp", local_runtime: "llamacpp" });
+      setDownload(await startModelDownload(false));
+    } catch {
+      setMessage("Could not start the model download.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveOnline = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await patchAiConfig({
+        ai_provider_id: providerId,
+        api_base_url: providerId === "openai_compatible_api" ? baseUrl : "",
+        api_model: model,
+      });
+      await setSessionSecret(providerId, apiKey);
+      const status = await testAiProvider();
+      setMessage(status.message);
+    } catch {
+      setMessage("Could not save or test that API provider.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const downloadPct =
+    download?.total_bytes && download.total_bytes > 0
+      ? Math.round((download.bytes_downloaded / download.total_bytes) * 100)
+      : null;
 
   return (
     <div className="firstrun">
@@ -48,146 +126,141 @@ export function FirstRunScreen({ health, theme, onToggleTheme, onExplore }: Firs
 
       <div className="firstrun__inner">
         <header className="firstrun__head">
-          <p className="eyebrow">First-time setup</p>
-          <h1 className="firstrun__title">Let's get Eva ready</h1>
+          <p className="eyebrow">AI setup</p>
+          <h1 className="firstrun__title">Choose how Eva thinks</h1>
           <p className="firstrun__lede">
-            Eva runs entirely on this machine — nothing you say ever leaves it. To
-            do that she needs her models downloaded once. Run the command below in
-            a terminal at the project root; this page updates on its own as each
-            piece arrives.
+            Run AI on this computer for maximum privacy, or connect your own online
+            provider. Online mode may send prompts and journal-derived context to
+            the provider you choose.
           </p>
         </header>
 
-        <Step
-          n={1}
-          title="Language model"
-          required
-          ready={health.modelPresent}
-          readyLabel="Model found"
-          waitingLabel="Not downloaded yet"
-          blurb="The Gemma model Eva thinks with. This is the one piece chat can't run without (about 3 GB, downloaded once)."
-          command={MODEL_CMD}
-          extra={
-            health.model.path ? (
-              <p className="firstrun__path">
-                Expected at <code>{health.model.path}</code>
-              </p>
-            ) : null
-          }
-        />
+        <div className="fr-choice">
+          <button
+            type="button"
+            className={`fr-choice__button${mode === "local" ? " fr-choice__button--active" : ""}`}
+            onClick={() => setMode("local")}
+          >
+            <Icon name="shield-check" size={18} />
+            <span>Run AI on this computer</span>
+          </button>
+          <button
+            type="button"
+            className={`fr-choice__button${mode === "online" ? " fr-choice__button--active" : ""}`}
+            onClick={() => setMode("online")}
+          >
+            <Icon name="sparkle" size={18} />
+            <span>Use online API</span>
+          </button>
+        </div>
 
-        <Step
-          n={2}
-          title="Voice (optional)"
-          required={false}
-          ready={voiceReady}
-          readyLabel="Voice ready"
-          waitingLabel="Not set up"
-          blurb="Speak to Eva and hear her reply. Optional — without it she simply stays in text, and you can add it any time. Run both commands for speech-in and speech-out."
-          command={STT_CMD}
-          command2={TTS_CMD}
-          partial={!voiceReady && (health.voices.stt || health.voices.tts)}
-        />
+        {mode === "local" ? (
+          <section className="fr-step">
+            <div className="fr-step__num" aria-hidden="true">
+              <Icon name="shield-check" size={18} />
+            </div>
+            <div className="fr-step__body">
+              <div className="fr-step__head">
+                <h2 className="fr-step__title">Local AI</h2>
+                <Badge tone={health.ai.configured ? "ok" : "neutral"}>
+                  {health.ai.configured ? "Configured" : "Setup needed"}
+                </Badge>
+              </div>
+              <p className="fr-step__blurb">
+                Eva can use an existing local AI server, or download Gemma and run it
+                through llama.cpp.
+              </p>
+              <div className="fr-actions">
+                <Button variant="secondary" onClick={findLocal} disabled={busy}>
+                  Find local AI
+                </Button>
+                <Button variant="primary" onClick={downloadLocal} disabled={busy}>
+                  Download Gemma
+                </Button>
+              </div>
+              {localFound.length > 0 && (
+                <div className="fr-list">
+                  {localFound.map((item) => (
+                    <button
+                      type="button"
+                      key={item.base_url}
+                      className="fr-list__item"
+                      onClick={() => chooseExistingLocal(item)}
+                    >
+                      <span>{item.label}</span>
+                      <code>{item.base_url}</code>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {download && (
+                <p className="firstrun__path">
+                  Download: <code>{download.state}</code>
+                  {downloadPct !== null ? ` ${downloadPct}%` : ""} at{" "}
+                  <code>{download.path}</code>
+                  {download.error ? ` (${download.error})` : ""}
+                </p>
+              )}
+            </div>
+          </section>
+        ) : (
+          <section className="fr-step">
+            <div className="fr-step__num" aria-hidden="true">
+              <Icon name="sparkle" size={18} />
+            </div>
+            <div className="fr-step__body">
+              <div className="fr-step__head">
+                <h2 className="fr-step__title">Online API</h2>
+                <Badge tone={health.ai.configured ? "ok" : "warn"}>
+                  {health.ai.configured ? "Configured" : "API key required"}
+                </Badge>
+              </div>
+              <div className="fr-form">
+                <select value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+                  <option value="openai_compatible_api">OpenAI-compatible</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Gemini</option>
+                </select>
+                {providerId === "openai_compatible_api" && (
+                  <input
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                    placeholder="Base URL"
+                  />
+                )}
+                <input
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="Model name"
+                />
+                <input
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="API key"
+                  type="password"
+                />
+                <Button variant="primary" onClick={saveOnline} disabled={busy || !apiKey || !model}>
+                  Save and test
+                </Button>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {message && <p className="settings__error">{message}</p>}
 
         <footer className="firstrun__foot">
-          {health.modelPresent ? (
+          {health.ai.configured ? (
             <p className="firstrun__done">
-              <Icon name="shield-check" size={16} /> All set — opening Eva…
+              <Icon name="shield-check" size={16} /> AI configured. Opening Eva...
             </p>
           ) : (
-            <>
-              <p className="firstrun__hint">
-                Eva will open automatically the moment the model is ready.
-              </p>
-              <Button variant="ghost" onClick={onExplore}>
-                Explore Eva without the model →
-              </Button>
-            </>
+            <Button variant="ghost" onClick={onExplore}>
+              Explore Eva without AI
+            </Button>
           )}
         </footer>
       </div>
-    </div>
-  );
-}
-
-type StepProps = {
-  n: number;
-  title: string;
-  required: boolean;
-  ready: boolean;
-  readyLabel: string;
-  waitingLabel: string;
-  blurb: string;
-  command: string;
-  command2?: string;
-  extra?: React.ReactNode;
-  /** Voice only: one of the two halves is present but not both. */
-  partial?: boolean;
-};
-
-/** One setup step: a numbered card with a live status pill and copyable command(s). */
-function Step({
-  n,
-  title,
-  required,
-  ready,
-  readyLabel,
-  waitingLabel,
-  blurb,
-  command,
-  command2,
-  extra,
-  partial,
-}: StepProps) {
-  return (
-    <section className={`fr-step${ready ? " fr-step--ready" : ""}`}>
-      <div className="fr-step__num" aria-hidden="true">
-        {ready ? <Icon name="shield-check" size={18} /> : n}
-      </div>
-      <div className="fr-step__body">
-        <div className="fr-step__head">
-          <h2 className="fr-step__title">{title}</h2>
-          {required && !ready && (
-            <span className="fr-step__req">Required</span>
-          )}
-          <Badge tone={ready ? "ok" : partial ? "warn" : "neutral"}>
-            {ready ? `${readyLabel} ✓` : partial ? "Halfway there" : waitingLabel}
-          </Badge>
-        </div>
-        <p className="fr-step__blurb">{blurb}</p>
-        <CommandLine command={command} />
-        {command2 && <CommandLine command={command2} />}
-        {extra}
-      </div>
-    </section>
-  );
-}
-
-/** A monospace command with a copy-to-clipboard button (no network, local only). */
-function CommandLine({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
-  };
-
-  return (
-    <div className="fr-cmd">
-      <code className="fr-cmd__text">{command}</code>
-      <button
-        type="button"
-        className="fr-cmd__copy"
-        onClick={copy}
-        aria-label={copied ? "Copied" : "Copy command"}
-      >
-        {copied ? "Copied!" : "Copy"}
-      </button>
     </div>
   );
 }

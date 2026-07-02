@@ -1,8 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Badge, Button, Icon } from "../components";
 import { useHealth } from "../useHealth";
 import { useVoice } from "../voice/VoiceContext";
-import { runPrivacyAudit, revealVault, type PrivacyAudit } from "./api";
+import {
+  patchAiConfig,
+  runPrivacyAudit,
+  revealVault,
+  setSessionSecret,
+  testAiProvider,
+  type PrivacyAudit,
+} from "./api";
 import { useSettings } from "./useSettings";
 
 /**
@@ -13,7 +20,7 @@ import { useSettings } from "./useSettings";
  *   - Voice: on/off (shared with the top-bar toggle, persisted), speaking speed,
  *     and the speech-recognition (whisper) size from Phase 8.
  *   - Privacy: the live outbound-guard verdict + an on-demand audit.
- *   - Your data: where the vault lives, with "reveal in Finder".
+ *   - Your data: where the vault lives, with "reveal in file manager".
  *   - Model: the language-model status read from /health.
  *
  * Values, choices, and ranges all come from the backend (the single source of
@@ -52,6 +59,42 @@ export function SettingsScreen() {
   const current = settings?.whisper_model_size ?? "base.en";
   const sizeInfo = SIZE_INFO[current];
   const speedRange = ranges?.voice_speed;
+  const [aiProvider, setAiProvider] = useState("local_llamacpp");
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+  const [apiModel, setApiModel] = useState("");
+  const [localEndpoint, setLocalEndpoint] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [aiSaving, setAiSaving] = useState(false);
+  const [aiMessage, setAiMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!settings) return;
+    setAiProvider(settings.ai_provider_id);
+    setApiBaseUrl(settings.api_base_url);
+    setApiModel(settings.api_model);
+    setLocalEndpoint(settings.local_endpoint);
+  }, [settings]);
+
+  const saveAi = async () => {
+    setAiSaving(true);
+    setAiMessage(null);
+    try {
+      await patchAiConfig({
+        ai_provider_id: aiProvider,
+        api_base_url: apiBaseUrl,
+        api_model: apiModel,
+        local_endpoint: localEndpoint,
+        local_runtime: aiProvider === "local_openai_compatible" ? "openai_compatible" : "llamacpp",
+      });
+      if (apiKey) await setSessionSecret(aiProvider, apiKey);
+      const status = await testAiProvider();
+      setAiMessage(status.message);
+    } catch {
+      setAiMessage("Could not save or test that AI provider.");
+    } finally {
+      setAiSaving(false);
+    }
+  };
 
   return (
     <div className="settings">
@@ -132,6 +175,84 @@ export function SettingsScreen() {
         {error && <p className="settings__error">{error}</p>}
       </Group>
 
+      <Group
+        icon="sparkle"
+        title="AI provider"
+        sub="Choose local AI for privacy, or connect your own online provider."
+      >
+        <Row label="Provider" hint="Online providers may receive prompts and journal-derived context.">
+          <div className="settings__select-wrap">
+            <select
+              className="settings__select"
+              value={aiProvider}
+              disabled={loading || aiSaving}
+              onChange={(e) => setAiProvider(e.target.value)}
+            >
+              <option value="local_llamacpp">Local Gemma with llama.cpp</option>
+              <option value="local_openai_compatible">Existing local OpenAI-compatible</option>
+              <option value="openai_compatible_api">Online OpenAI-compatible</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="gemini">Gemini</option>
+            </select>
+            <span className="settings__select-chevron" aria-hidden="true">
+              <Icon name="chevron-down" size={16} />
+            </span>
+          </div>
+        </Row>
+
+        {aiProvider === "local_openai_compatible" && (
+          <Row label="Local endpoint" hint="Loopback /v1 URL from Ollama, LM Studio, or llama.cpp.">
+            <input
+              className="settings__text-input"
+              value={localEndpoint}
+              onChange={(e) => setLocalEndpoint(e.target.value)}
+              placeholder="http://127.0.0.1:1234/v1"
+            />
+          </Row>
+        )}
+
+        {aiProvider === "openai_compatible_api" && (
+          <Row label="API base URL" hint="The provider's OpenAI-compatible /v1 URL.">
+            <input
+              className="settings__text-input"
+              value={apiBaseUrl}
+              onChange={(e) => setApiBaseUrl(e.target.value)}
+              placeholder="https://api.openai.com/v1"
+            />
+          </Row>
+        )}
+
+        {aiProvider !== "local_llamacpp" && (
+          <Row label="Model" hint="The model name Eva should request from this provider.">
+            <input
+              className="settings__text-input"
+              value={apiModel}
+              onChange={(e) => setApiModel(e.target.value)}
+              placeholder="model name"
+            />
+          </Row>
+        )}
+
+        {aiProvider !== "local_llamacpp" && aiProvider !== "local_openai_compatible" && (
+          <Row label="API key" hint="Sent to the backend for this session; never written to settings.json.">
+            <input
+              className="settings__text-input"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              type="password"
+              placeholder="Paste API key"
+            />
+          </Row>
+        )}
+
+        <div className="settings__audit">
+          <Button variant="secondary" size="sm" onClick={saveAi} disabled={aiSaving}>
+            {aiSaving ? "Testing..." : "Save and test AI"}
+          </Button>
+          {aiMessage && <p className="settings__audit-verdict">{aiMessage}</p>}
+        </div>
+      </Group>
+
       {/* ── Privacy ────────────────────────────────────────────────────── */}
       <PrivacyGroup health={health} />
 
@@ -141,7 +262,7 @@ export function SettingsScreen() {
         title="Your data"
         sub="Your journal lives as plain Markdown files you own. Eva's databases are derived from them and can always be rebuilt."
       >
-        <Row label="Vault location" hint="Where your entries and settings are stored on this Mac.">
+        <Row label="Vault location" hint="Where your entries and settings are stored on this computer.">
           <VaultLocation path={vaultPath} loading={loading} />
         </Row>
       </Group>
@@ -214,9 +335,9 @@ function VaultLocation({ path, loading }: { path: string | null; loading: boolea
     setReason(null);
     try {
       const r = await revealVault();
-      if (!r.opened) setReason("Couldn't open Finder — the path is shown above.");
+      if (!r.opened) setReason("Couldn't open the file manager — the path is shown above.");
     } catch {
-      setReason("Couldn't open Finder — the path is shown above.");
+      setReason("Couldn't open the file manager — the path is shown above.");
     }
   };
 
@@ -230,7 +351,7 @@ function VaultLocation({ path, loading }: { path: string | null; loading: boolea
         onClick={reveal}
         disabled={loading || !path}
       >
-        Reveal in Finder
+        Reveal in file manager
       </Button>
       {reason && <p className="settings__muted settings__muted--small">{reason}</p>}
     </div>

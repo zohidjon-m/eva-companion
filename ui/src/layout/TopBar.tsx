@@ -65,6 +65,17 @@ export function TopBar({ health, theme, onToggleTheme }: TopBarProps) {
  */
 function OfflineBadge({ health }: { health: Health }) {
   const { netGuard, netGuardViolations } = health;
+  if (health.ai.ai_mode === "online") {
+    return (
+      <Badge
+        tone={health.ai.configured ? "warn" : "danger"}
+        iconBefore={<Icon name="sparkle" size={14} />}
+        title="Eva is configured to use an online API provider."
+      >
+        {health.ai.configured ? "Online API" : "Provider unavailable"}
+      </Badge>
+    );
+  }
   if (!netGuard) {
     return (
       <Badge
@@ -93,7 +104,7 @@ function OfflineBadge({ health }: { health: Health }) {
       iconBefore={<Icon name="shield-check" size={14} />}
       title="No data leaves this device. Outbound network is blocked."
     >
-      Offline ✓
+      Local AI
     </Badge>
   );
 }
