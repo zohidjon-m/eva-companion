@@ -391,13 +391,14 @@ def _write_entries(no_embed: bool) -> tuple[int, dict[str, list[str]]]:
                 text=rec.text, word_count=rec.word_count, created_at=rec.created_at,
                 is_seeded=False,
             )
-            db.create_pending_extraction(conn, rec.id)
+            source_hash = vault.source_hash(rec.text)
+            db.create_pending_extraction(conn, rec.id, source_hash=source_hash)
             db.finalize_extraction(
                 conn, rec.id,
                 mood=mood, emotions=emotions, entities=[], themes=themes,
                 events=[], stated_goals=[], behaviors=[], decisions=[],
                 open_loops=[], self_judgments=[], summary=summary,
-                extracted_at=rec.created_at,
+                extracted_at=rec.created_at, source_hash=source_hash,
             )
             db.upsert_mood_series(
                 conn, entry_id=rec.id, date=rec.date,

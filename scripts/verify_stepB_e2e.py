@@ -54,7 +54,7 @@ async def main() -> int:
 
     # Markdown has all three turns.
     md_days = {r.date for r in recs}
-    md_turns = sum(vault.day_file(d).read_text().count("<!-- id:") for d in md_days)
+    md_turns = sum(len(vault.read_day(d)) for d in md_days)
     print(f"\nmarkdown turns on disk: {md_turns}")
 
     # Recall works on real vectors.
