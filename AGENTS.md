@@ -1,16 +1,19 @@
-You are building "Eva", a fully offline desktop AI journaling companion.
+You are building "Eva", a privacy-first hybrid-provider desktop AI journaling companion.
 Hardware target: MacBook M1 Air 8 GB RAM (Apple Silicon; Metal GPU offload
 via --n_gpu_layers -1). Voice models (faster-whisper, Kokoro) are lazy-loaded
 on first use — never at startup — to stay within the 8 GB memory budget.
 Stack: Tauri (Rust shell) + React/Vite frontend + Python FastAPI backend +
 native llama.cpp `llama-server` binary running gemma-4-E2B-it-qat (Q4_K_XL GGUF)
-on port 11500, all layers on Metal GPU +
-ChromaDB + SQLite + faster-whisper + Kokoro TTS.
+on port 11500 for the default `local_llamacpp` provider, opt-in online API
+providers behind the same provider interface, ChromaDB + SQLite +
+faster-whisper + Kokoro TTS.
 English only.
 
-Model server: the native llama.cpp `llama-server` binary is the ONLY launcher.
-There is no `python -m llama_cpp.server` / llama-cpp-python fallback — it was
-removed. Install the binary with `brew install llama.cpp`.
+Default provider: local llama.cpp remains the recommended privacy-first path.
+For the `local_llamacpp` provider, the native llama.cpp `llama-server` binary is
+the ONLY launcher. There is no `python -m llama_cpp.server` /
+llama-cpp-python fallback — it was removed. Install the binary with
+`brew install llama.cpp`.
 
 Model server command (run `llama-server --help` to see every flag):
 llama-server \
@@ -65,8 +68,9 @@ Rules:
    it does and why it exists. A human will read all of this code.
 3. After implementing, run the phase's checks. Fix failures BEFORE reporting
    done. Then list: files changed, how to test manually, anything left TODO.
-4. Privacy is hard law: no telemetry, no analytics, no outbound network calls
-   at runtime. Only the first-run model/voice download is allowed.
+4. Privacy is hard law: no telemetry and no analytics. Local mode blocks
+   outbound runtime calls except explicit first-run model/voice downloads.
+   Online API mode is opt-in and may call only the configured provider host.
 5. Full journal entries are plain Markdown on disk — the source of truth.
    Databases are derived and rebuildable; Markdown never depends on them.
 6. Stubs (profile, insights) go behind the same interface the real component
