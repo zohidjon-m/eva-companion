@@ -36,12 +36,13 @@ def capture_entry(text: str, entry_type: str) -> vault.EntryRecord:
 
     conn = db.get_or_create_db()
     try:
+        source_hash = vault.source_hash(rec.text)
         db.insert_entry(
             conn,
             id=rec.id, date=rec.date, type=rec.type,
             text=rec.text, word_count=rec.word_count, created_at=rec.created_at,
         )
-        db.create_pending_extraction(conn, rec.id)
+        db.create_pending_extraction(conn, rec.id, source_hash=source_hash)
     finally:
         conn.close()
 
@@ -65,9 +66,20 @@ async def run_extraction_and_embed(
     Embedding is best-effort: the entry and its extraction are already durable, so
     an embedding failure is logged but does not roll anything back.
     """
+    source_hash = vault.source_hash(text)
+
+    conn = db.get_or_create_db()
+    try:
+        current_status = db.current_extraction_status(conn, entry_id, source_hash)
+        if current_status is not None:
+            log.info("skipped extraction for unchanged entry %s", entry_id)
+            return current_status
+    finally:
+        conn.close()
+
     result = await extract.extract_entry(text, call_model=call_model)
 
-    conn = db.connect()
+    conn = db.get_or_create_db()
     try:
         if result.status == "done":
             db.finalize_extraction(
@@ -77,13 +89,14 @@ async def run_extraction_and_embed(
                 behaviors=result.behaviors, decisions=result.decisions,
                 open_loops=result.open_loops, self_judgments=result.self_judgments,
                 summary=result.summary, extracted_at=result.extracted_at,
+                source_hash=source_hash,
             )
             db.upsert_mood_series(
                 conn, entry_id=entry_id, date=date,
                 mood=result.mood, emotions=result.emotions,
             )
         else:
-            db.mark_null_stored(conn, entry_id)
+            db.mark_null_stored(conn, entry_id, source_hash=source_hash)
     finally:
         conn.close()
 

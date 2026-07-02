@@ -105,6 +105,7 @@ def test_capture_writes_vault_db_and_pending(mem):
     assert db.count_entries(conn) == 1
     ext = db.get_extraction(conn, rec.id)
     assert ext["extraction_status"] == "pending"
+    assert ext["source_hash"] == vault.source_hash(rec.text)
     conn.close()
 
 
@@ -121,6 +122,7 @@ def test_run_extraction_done_finalizes_and_embeds(mem):
     assert ext["extraction_status"] == "done"
     assert ext["mood"] == 3
     assert ext["summary"].startswith("They hiked")
+    assert ext["source_hash"] == vault.source_hash(rec.text)
     # mood_series populated (capture-completeness write).
     ms = conn.execute("SELECT * FROM mood_series WHERE entry_id=?", (rec.id,)).fetchone()
     assert ms is not None and ms["mood"] == 3
@@ -144,6 +146,7 @@ def test_malformed_model_output_yields_null_stored_but_entry_survives(mem):
     ext = db.get_extraction(conn, rec.id)
     assert ext["extraction_status"] == "null_stored"
     assert ext["mood"] is None and ext["summary"] is None
+    assert ext["source_hash"] == vault.source_hash(rec.text)
     conn.close()
 
     # The vault entry is fully intact despite extraction failure.
@@ -164,3 +167,88 @@ def test_markdown_survives_db_deletion(mem):
 
     # L0 is untouched and still complete.
     assert rec.text in md.read_text()
+
+
+def test_unchanged_extraction_skips_model_and_embed(mem):
+    capture, db, vault, embed_calls = mem
+    rec = capture.capture_entry("Hiked with Sam, felt great.", "journal")
+    first = asyncio.run(capture.run_extraction_and_embed(
+        rec.id, rec.text, rec.date, call_model=make_caller(GOOD_JSON)
+    ))
+    assert first == "done"
+
+    async def should_not_call(prompt, *, temperature, max_tokens):
+        raise AssertionError("unchanged entry should not call the model")
+
+    second = asyncio.run(capture.run_extraction_and_embed(
+        rec.id, rec.text, rec.date, call_model=should_not_call
+    ))
+
+    assert second == "done"
+    assert len(embed_calls) == 1
+
+
+def test_changed_body_keeps_uid_but_changes_source_hash(mem):
+    capture, db, vault, embed_calls = mem
+    rec = capture.capture_entry("Original body.", "journal")
+    status = asyncio.run(capture.run_extraction_and_embed(
+        rec.id, rec.text, rec.date, call_model=make_caller(GOOD_JSON)
+    ))
+    assert status == "done"
+
+    conn = db.connect()
+    try:
+        first_hash = db.get_extraction(conn, rec.id)["source_hash"]
+    finally:
+        conn.close()
+
+    updated = vault.update_entry(rec.id, "Changed body.")
+    assert updated is not None and updated.id == rec.id
+    conn = db.connect()
+    try:
+        db.update_entry_text(
+            conn, updated.id, text=updated.text, word_count=updated.word_count
+        )
+    finally:
+        conn.close()
+
+    status = asyncio.run(capture.run_extraction_and_embed(
+        updated.id, updated.text, updated.date, call_model=make_caller(GOOD_JSON)
+    ))
+
+    conn = db.connect()
+    try:
+        second_hash = db.get_extraction(conn, rec.id)["source_hash"]
+    finally:
+        conn.close()
+    assert status == "done"
+    assert second_hash == vault.source_hash("Changed body.")
+    assert second_hash != first_hash
+    assert len(embed_calls) == 2
+
+
+def test_entry_ids_survive_db_rebuild_from_markdown(mem):
+    capture, db, vault, _ = mem
+    first = capture.capture_entry("First durable entry.", "journal")
+    second = capture.capture_entry("Second durable entry.", "chat")
+    original_ids = {first.id, second.id}
+
+    db.db_path().unlink()
+    conn = db.get_or_create_db()
+    try:
+        for date in vault.list_day_dates():
+            for turn in vault.read_day(date):
+                db.insert_entry(
+                    conn,
+                    id=turn.id,
+                    date=date,
+                    type=turn.type,
+                    text=turn.text,
+                    word_count=len(turn.text.split()),
+                    created_at=f"{date}T{turn.time}",
+                )
+        rebuilt_ids = {r["id"] for r in conn.execute("SELECT id FROM entries")}
+    finally:
+        conn.close()
+
+    assert rebuilt_ids == original_ids

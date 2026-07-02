@@ -14,6 +14,7 @@ in flight, never history.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import shutil
@@ -45,11 +46,13 @@ class EntryRecord:
 
     ``save_entry`` returns this after writing the Markdown. Its fields line up
     one-to-one with the ``entries`` table columns so Step B can hand it straight
-    to ``db.insert_entry`` without reshaping. The full ``text`` is carried so the
-    index can store it verbatim.
+    to ``db.insert_entry`` without reshaping. ``id`` is Eva's durable entry UID:
+    it is generated once, stored in L0, and reused by every derived layer as the
+    evidence pointer. The full ``text`` is carried so the index can store it
+    verbatim.
     """
 
-    id: str
+    id: str            # stable UID, never derived from the entry text
     date: str          # YYYY-MM-DD (local day the turn was written)
     type: str          # "chat" | "journal"
     text: str          # the full turn text, exactly as written
@@ -85,15 +88,30 @@ def _frontmatter(date: str, created_at: str) -> str:
 def _turn_block(rec: EntryRecord, time_str: str) -> str:
     """Render one turn as a Markdown section.
 
-    The entry id is embedded as an HTML comment so it is invisible when the file
-    is read as prose but still recoverable by tooling (e.g. a future rebuild of
-    the L1 index from L0). The body is the user's text verbatim.
+    The entry id is Eva's durable UID, written in the V2 header so a DB rebuild
+    can preserve evidence pointers without depending on hidden comments. The
+    body is the user's text after the same surrounding-whitespace trim the parser
+    applies.
     """
     return (
-        f"\n## {time_str} · {rec.type}\n"
-        f"<!-- id: {rec.id} -->\n\n"
+        f"\n## {time_str} · {rec.type} · {rec.id}\n\n"
         f"{rec.text.strip()}\n"
     )
+
+
+def canonical_entry_text(text: str) -> str:
+    """Return the exact body text Eva treats as an entry's source content.
+
+    Markdown block headers and legacy id comments are metadata, not journal
+    content. R2's ``source_hash`` is based only on this canonical body so a
+    header migration does not make derived memory stale.
+    """
+    return text.strip()
+
+
+def source_hash(text: str) -> str:
+    """Return a stable SHA-256 hash for an entry's canonical source body."""
+    return hashlib.sha256(canonical_entry_text(text).encode("utf-8")).hexdigest()
 
 
 def save_entry(text: str, entry_type: str, *, when: datetime | None = None) -> EntryRecord:
@@ -123,12 +141,13 @@ def save_entry(text: str, entry_type: str, *, when: datetime | None = None) -> E
     ts = when or datetime.now()
     date = ts.strftime("%Y-%m-%d")
     created_at = ts.isoformat(timespec="seconds")
+    body = canonical_entry_text(text)
     rec = EntryRecord(
         id=str(uuid.uuid4()),
         date=date,
         type=entry_type,
-        text=text,
-        word_count=len(text.split()),
+        text=body,
+        word_count=len(body.split()),
         created_at=created_at,
     )
 
@@ -158,7 +177,7 @@ def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
     """
     if not new_text or not new_text.strip():
         raise ValueError("refusing to save an empty entry")
-    body = new_text.strip()
+    body = canonical_entry_text(new_text)
 
     with _write_lock:
         for date in list_day_dates():
@@ -174,10 +193,23 @@ def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
 
             while i < n:
                 line = lines[i]
+                parsed_header = _parse_turn_header(line)
                 header = _TURN_HEADER_RE.match(line)
-                if header:
-                    cur_time, cur_type = header.group(1), header.group(2).strip()
+                if parsed_header:
+                    cur_time, cur_type, header_uid = parsed_header
+                elif header:
+                    cur_time, cur_type, header_uid = header.group(1), header.group(2).strip(), None
                 out.append(line)
+                if parsed_header and parsed_header[2] == entry_id:
+                    found = True
+                    hit_time, hit_type = parsed_header[0], parsed_header[1]
+                    i += 1
+                    while i < n and not _TURN_HEADER_RE.match(lines[i]):
+                        i += 1
+                    out.append("")
+                    out.extend(body.split("\n"))
+                    out.append("")
+                    continue
                 id_match = _ID_RE.match(line.strip())
                 if id_match and id_match.group(1).strip() == entry_id:
                     found = True
@@ -229,6 +261,17 @@ _TURN_HEADER_RE = re.compile(r"^## (\d{2}:\d{2}:\d{2}) · (.+)$")
 _ID_RE = re.compile(r"^<!-- id: (.+) -->$")
 
 
+def _parse_turn_header(line: str) -> tuple[str, str, str | None] | None:
+    match = _TURN_HEADER_RE.match(line)
+    if not match:
+        return None
+    time_str = match.group(1)
+    parts = [p.strip() for p in match.group(2).split(" · ")]
+    turn_type = parts[0]
+    uid = parts[1] if len(parts) > 1 and parts[1] else None
+    return time_str, turn_type, uid
+
+
 @dataclass(frozen=True)
 class DayTurn:
     """One turn parsed back out of a day file (read-only view).
@@ -242,6 +285,105 @@ class DayTurn:
     time: str          # HH:MM:SS
     type: str          # "chat" | "journal" (whatever the header carried)
     text: str          # the body, stripped of surrounding blank lines
+
+
+@dataclass(frozen=True)
+class BackfillReport:
+    """Summary of a Markdown UID-header backfill run.
+
+    ``errors`` is non-empty when a file was unsafe to rewrite, usually because a
+    V2 header UID and legacy comment id disagree. Files with errors are left
+    untouched so a human can inspect the identity conflict.
+    """
+
+    files_checked: int
+    files_changed: int
+    entries_changed: int
+    errors: tuple[str, ...]
+
+
+def _backfill_day_text(
+    text: str, *, id_factory=lambda: str(uuid.uuid4())
+) -> tuple[str, int]:
+    lines = text.split("\n")
+    out: list[str] = []
+    changed_entries = 0
+    i, n = 0, len(lines)
+
+    while i < n:
+        line = lines[i]
+        parsed = _parse_turn_header(line)
+        if parsed is None:
+            out.append(line)
+            i += 1
+            continue
+
+        time_str, turn_type, header_uid = parsed
+        legacy_uid: str | None = None
+        if i + 1 < n:
+            legacy_match = _ID_RE.match(lines[i + 1].strip())
+            if legacy_match:
+                legacy_uid = legacy_match.group(1).strip()
+
+        if header_uid and legacy_uid and header_uid != legacy_uid:
+            raise ValueError(
+                f"conflicting ids at {time_str}: header has {header_uid}, "
+                f"legacy comment has {legacy_uid}"
+            )
+
+        uid = header_uid or legacy_uid or id_factory()
+        new_header = f"## {time_str} · {turn_type} · {uid}"
+        out.append(new_header)
+        if new_header != line or legacy_uid is not None:
+            changed_entries += 1
+
+        i += 1
+        if legacy_uid is not None:
+            i += 1
+
+    return "\n".join(out), changed_entries
+
+
+def backfill_entry_uids() -> BackfillReport:
+    """Rewrite legacy day files so every turn carries its UID in the header.
+
+    This is the one-time R2 migration for L0 Markdown. It is idempotent: V2
+    headers are left as-is, legacy ``<!-- id: ... -->`` comments are promoted to
+    the header, and missing ids get UUIDv4 values. A file with conflicting ids is
+    reported and not rewritten.
+    """
+    files_checked = 0
+    files_changed = 0
+    entries_changed = 0
+    errors: list[str] = []
+
+    with _write_lock:
+        for date in list_day_dates():
+            files_checked += 1
+            path = day_file(date)
+            original = path.read_text(encoding="utf-8")
+            try:
+                updated, changed = _backfill_day_text(original)
+            except ValueError as exc:
+                errors.append(f"{path.name}: {exc}")
+                continue
+            if changed == 0:
+                continue
+            backup = path.with_suffix(path.suffix + ".uid-backfill.bak")
+            shutil.copy2(path, backup)
+            tmp = path.with_suffix(path.suffix + ".uid-backfill.tmp")
+            tmp.write_text(updated, encoding="utf-8")
+            tmp.replace(path)
+            files_changed += 1
+            entries_changed += changed
+            log.info("backfilled %d uid header(s) in %s", changed, path.name)
+
+    return BackfillReport(
+        files_checked=files_checked,
+        files_changed=files_changed,
+        entries_changed=entries_changed,
+        errors=tuple(errors),
+    )
 
 
 def list_day_dates() -> list[str]:
@@ -287,17 +429,18 @@ def read_day(date: str) -> list[DayTurn]:
             )
 
     for line in path.read_text(encoding="utf-8").splitlines():
-        header = _TURN_HEADER_RE.match(line)
+        header = _parse_turn_header(line)
         if header:
             flush()
-            cur = {"time": header.group(1), "type": header.group(2).strip(), "id": None}
+            cur = {"time": header[0], "type": header[1], "id": header[2]}
             body = []
             continue
         if cur is None:
             continue  # frontmatter / day heading — nothing to collect yet
         id_match = _ID_RE.match(line.strip())
-        if id_match and cur["id"] is None and not body:
-            cur["id"] = id_match.group(1).strip()
+        if id_match and not body:
+            if cur["id"] is None:
+                cur["id"] = id_match.group(1).strip()
             continue
         body.append(line)
     flush()

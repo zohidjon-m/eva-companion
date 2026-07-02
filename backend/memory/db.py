@@ -37,7 +37,9 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # graph can be pruned later, mirroring the flag already on entries/mood_series.
 # v3 (chat history): added `conversations` + `chat_turns` so the Chat screen can
 # persist and reopen full conversations (both sides), separate from the journal.
-SCHEMA_USER_VERSION = 3
+# v4 (R2 / Phase 3.5): added `extractions.source_hash` and a unique extraction
+# row per stable entry UID.
+SCHEMA_USER_VERSION = 4
 
 
 def db_path() -> Path:
@@ -104,6 +106,13 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
         # `CREATE TABLE IF NOT EXISTS` in schema.sql that init_db() runs *before*
         # this migration, so there is nothing to ALTER here — just record the bump.
         log.info("migrated eva.db schema v2 → v3 (conversations + chat_turns)")
+    if from_version < 4:
+        _add_column_if_missing(conn, "extractions", "source_hash", "TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_extractions_entry_id "
+            "ON extractions(entry_id)"
+        )
+        log.info("migrated eva.db schema v3 → v4 (source_hash + extraction uid index)")
     conn.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION};")
 
 
@@ -248,17 +257,23 @@ _JSON_FIELDS = (
 )
 
 
-def create_pending_extraction(conn: sqlite3.Connection, entry_id: str) -> str:
+def create_pending_extraction(
+    conn: sqlite3.Connection, entry_id: str, *, source_hash: str | None = None
+) -> str:
     """Insert a ``pending`` extractions row for an entry and return its id.
 
     Called at capture time, in the same breath as ``insert_entry`` — so even if
     extraction never runs (crash, model down), the entry is on record as awaiting
-    extraction and a nightly sweep can re-queue it.
+    extraction and a nightly sweep can re-queue it. ``source_hash`` records the
+    exact L0 body this pending row represents, enabling later dirty checks.
     """
     ext_id = str(uuid.uuid4())
     conn.execute(
-        "INSERT INTO extractions (id, entry_id, extraction_status) VALUES (?, ?, 'pending')",
-        (ext_id, entry_id),
+        """
+        INSERT INTO extractions (id, entry_id, extraction_status, source_hash)
+        VALUES (?, ?, 'pending', ?)
+        """,
+        (ext_id, entry_id, source_hash),
     )
     conn.commit()
     return ext_id
@@ -280,12 +295,14 @@ def finalize_extraction(
     self_judgments: list,
     summary: str,
     extracted_at: str,
+    source_hash: str | None = None,
 ) -> None:
     """Write a successful extraction onto the entry's row (status → ``done``).
 
     All structured fields are JSON-encoded into their TEXT columns exactly as the
     §7.1 schema documents. ``mood`` stays a real integer (or NULL). Idempotent per
-    entry: updates the single row keyed by ``entry_id``.
+    entry: updates the single row keyed by ``entry_id``. ``source_hash`` pins the
+    result to the exact canonical L0 body that was extracted.
     """
     values = {
         "mood": mood,
@@ -300,6 +317,7 @@ def finalize_extraction(
         "self_judgments": json.dumps(self_judgments, ensure_ascii=False),
         "summary": summary,
         "extracted_at": extracted_at,
+        "source_hash": source_hash,
     }
     conn.execute(
         """
@@ -309,7 +327,8 @@ def finalize_extraction(
             events=:events, stated_goals=:stated_goals, behaviors=:behaviors,
             decisions=:decisions, open_loops=:open_loops,
             self_judgments=:self_judgments, summary=:summary,
-            extracted_at=:extracted_at
+            extracted_at=:extracted_at,
+            source_hash=COALESCE(:source_hash, source_hash)
         WHERE entry_id=:entry_id
         """,
         {**values, "entry_id": entry_id},
@@ -317,15 +336,22 @@ def finalize_extraction(
     conn.commit()
 
 
-def mark_null_stored(conn: sqlite3.Connection, entry_id: str) -> None:
+def mark_null_stored(
+    conn: sqlite3.Connection, entry_id: str, *, source_hash: str | None = None
+) -> None:
     """Mark an extraction as failed-but-stored: status ``null_stored``, fields NULL.
 
     The save is never lost; only the structure is missing. A nightly sweep
     re-queues these rows (§7.1). The mood chart treats NULL mood as a gap, never 0.
     """
     conn.execute(
-        "UPDATE extractions SET extraction_status='null_stored' WHERE entry_id=?",
-        (entry_id,),
+        """
+        UPDATE extractions
+        SET extraction_status='null_stored',
+            source_hash=COALESCE(?, source_hash)
+        WHERE entry_id=?
+        """,
+        (source_hash, entry_id),
     )
     conn.commit()
 
@@ -335,6 +361,24 @@ def get_extraction(conn: sqlite3.Connection, entry_id: str) -> sqlite3.Row | Non
     return conn.execute(
         "SELECT * FROM extractions WHERE entry_id=?", (entry_id,)
     ).fetchone()
+
+
+def current_extraction_status(
+    conn: sqlite3.Connection, entry_id: str, source_hash: str
+) -> str | None:
+    """Return ``done``/``null_stored`` when an extraction already matches L0.
+
+    R2 uses this to skip model and embedding work for unchanged entries while
+    still reprocessing pending rows or rows whose stored hash differs from the
+    canonical body about to be extracted.
+    """
+    row = get_extraction(conn, entry_id)
+    if row is None:
+        return None
+    if row["source_hash"] != source_hash:
+        return None
+    status = row["extraction_status"]
+    return status if status in {"done", "null_stored"} else None
 
 
 def mood_series_range(

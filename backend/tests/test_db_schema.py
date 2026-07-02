@@ -32,9 +32,10 @@ def db(tmp_path, monkeypatch):
 EXPECTED_COLUMNS = {
     "entries": ["id", "date", "type", "text", "word_count", "is_seeded", "created_at"],
     "extractions": [
-        "id", "entry_id", "extraction_status", "mood", "emotions", "entities",
-        "themes", "events", "stated_goals", "behaviors", "decisions",
-        "open_loops", "self_judgments", "summary", "extracted_at",
+        "id", "entry_id", "extraction_status", "source_hash", "mood",
+        "emotions", "entities", "themes", "events", "stated_goals",
+        "behaviors", "decisions", "open_loops", "self_judgments", "summary",
+        "extracted_at",
     ],
     "mood_series": ["id", "entry_id", "date", "mood", "emotions", "is_seeded"],
     "graph_nodes": ["id", "label", "type", "entry_count", "entries", "is_seeded"],
@@ -75,7 +76,7 @@ def test_columns_exact(db, table, cols):
 def test_user_version_stamped(db):
     db_mod, conn = db
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == db_mod.SCHEMA_USER_VERSION == 3
+    assert version == db_mod.SCHEMA_USER_VERSION == 4
 
 
 def test_entries_type_check_constraint(db):
@@ -144,6 +145,80 @@ def test_v1_to_v2_migration_adds_graph_is_seeded(db):
         assert "is_seeded" in cols, f"{table}.is_seeded not added by migration"
     # init_db migrates all the way forward to the current version.
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db_mod.SCHEMA_USER_VERSION
+
+
+def test_v3_to_v4_migration_adds_source_hash_and_unique_entry_index(db):
+    """A v3 db gets extraction source hashes and one row per stable entry UID."""
+    db_mod, conn = db
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS idx_extractions_entry_id;
+        ALTER TABLE extractions RENAME TO extractions_old;
+        CREATE TABLE extractions (
+            id TEXT PRIMARY KEY,
+            entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+            extraction_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(extraction_status IN ('pending','done','failed','null_stored')),
+            mood INTEGER,
+            emotions TEXT,
+            entities TEXT,
+            themes TEXT,
+            events TEXT,
+            stated_goals TEXT,
+            behaviors TEXT,
+            decisions TEXT,
+            open_loops TEXT,
+            self_judgments TEXT,
+            summary TEXT,
+            extracted_at TEXT
+        );
+        INSERT INTO extractions (
+            id, entry_id, extraction_status, mood, emotions, entities, themes,
+            events, stated_goals, behaviors, decisions, open_loops,
+            self_judgments, summary, extracted_at
+        )
+        SELECT
+            id, entry_id, extraction_status, mood, emotions, entities, themes,
+            events, stated_goals, behaviors, decisions, open_loops,
+            self_judgments, summary, extracted_at
+        FROM extractions_old;
+        DROP TABLE extractions_old;
+        PRAGMA user_version = 3;
+        """
+    )
+    conn.commit()
+    assert "source_hash" not in {r["name"] for r in conn.execute("PRAGMA table_info(extractions)")}
+
+    db_mod.init_db(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(extractions)")}
+    assert "source_hash" in cols
+    indexes = {
+        r["name"]
+        for r in conn.execute("PRAGMA index_list(extractions)")
+        if r["unique"]
+    }
+    assert "idx_extractions_entry_id" in indexes
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db_mod.SCHEMA_USER_VERSION
+
+
+def test_extractions_entry_id_unique(db):
+    """Each stable entry UID has at most one extraction row."""
+    _, conn = db
+    conn.execute(
+        "INSERT INTO entries (id, date, type, text, word_count, created_at) "
+        "VALUES ('e1', '2026-06-16', 'chat', 'hi', 1, '2026-06-16T09:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO extractions (id, entry_id, extraction_status) "
+        "VALUES ('x1', 'e1', 'pending')"
+    )
+    conn.commit()
+    with pytest.raises(Exception):
+        conn.execute(
+            "INSERT INTO extractions (id, entry_id, extraction_status) "
+            "VALUES ('x2', 'e1', 'pending')"
+        )
 
 
 def test_init_db_idempotent(db):

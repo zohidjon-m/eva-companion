@@ -2,13 +2,13 @@
 -- Increment PRAGMA user_version on every schema change; add a migration block in db.py.
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
--- PRAGMA user_version = 3;
+-- PRAGMA user_version = 4;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- L0 index (truth lives in Markdown files; this table is the queryable index)
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS entries (
-    id          TEXT PRIMARY KEY,                        -- UUID v4
+    id          TEXT PRIMARY KEY,                        -- stable UID, currently UUID v4
     date        TEXT NOT NULL,                           -- YYYY-MM-DD
     type        TEXT NOT NULL CHECK(type IN ('chat','journal')),
     text        TEXT NOT NULL,                           -- full turn/entry text
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS extractions (
     entry_id            TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     extraction_status   TEXT NOT NULL DEFAULT 'pending'
                         CHECK(extraction_status IN ('pending','done','failed','null_stored')),
+    source_hash         TEXT,              -- sha256 of the canonical L0 body used for extraction
     -- Mood scalar and emotion array
     mood                INTEGER,           -- -5..+5; NULL if extraction failed
     emotions            TEXT,              -- JSON: [{name, intensity: 0..1}]
@@ -48,6 +49,8 @@ CREATE TABLE IF NOT EXISTS extractions (
     summary             TEXT,             -- 4-5 sentences; NULL until status = done
     extracted_at        TEXT              -- ISO-8601; NULL until status = done
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_extractions_entry_id ON extractions(entry_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- L4 mood time-series (denormalized for fast chart queries; no LLM needed)
