@@ -1,25 +1,25 @@
 # Eva — System Design & Architecture
 
-**A fully on-device, private AI journaling companion**
+**A privacy-first hybrid AI journaling companion**
 *Architecture doc v1 · 2026-06-09 · Tauri (macOS + Windows) · Gemma 4 E2B (QAT GGUF) · Kokoro TTS · faster-whisper STT*
 
 ---
 
 ## 1. Context
 
-Eva is a desktop companion the user journals with daily — by voice or text, for 5–15 minutes — the way you'd talk to a close friend. The differentiator is not chat; it is a **deep, evolving model of the user** that makes every conversation more accurate over time. Everything runs on the user's machine. Nothing leaves it.
+Eva is a desktop companion the user journals with daily — by voice or text, for 5–15 minutes — the way you'd talk to a close friend. The differentiator is not chat; it is a **deep, evolving model of the user** that makes every conversation more accurate over time. Local AI remains the privacy-first default; online API mode is opt-in and may send prompts and selected context only to the configured provider host.
 
 This document defines the system: its processes, components, data, runtime flows, and the trade-offs behind them. It sits on top of two companion docs — the **Memory Architecture** (the five layers and their rules) and the **Build Plan** (phased execution) — and assumes them.
 
 ### Goals
-- A single installable app for macOS and Windows that works fully offline after first-run setup.
+- A single installable app for macOS and Windows that works locally after first-run setup, with optional online API mode for users who choose it.
 - Natural, low-latency two-way voice plus text.
 - A memory that visibly improves the companion the longer it's used.
 - All nine product features (venting, opt-in grounded advice, evolving memory, mood tracking, pattern detection, knowledge graph, time-travel recall, growth analytics).
 - The user owns and can read/edit/delete all their data in plain files.
 
 ### Non-goals (v1)
-- No cloud, no accounts, no sync, no telemetry.
+- No required cloud account, no sync, no telemetry.
 - No multi-user or sharing.
 - Not a therapist, coach-bot, or roleplay character — a companion that listens first.
 - No always-on listening (push-to-talk only).
@@ -31,7 +31,7 @@ This document defines the system: its processes, components, data, runtime flows
 These shape every decision downstream:
 
 1. **Small local model.** Gemma 4 E2B (~3 GB). Reliable only on small, bounded jobs — single-entry extraction and short narration over pre-assembled evidence. Never long-horizon reasoning. *(The "bad historian, good clerk" principle.)*
-2. **Fully on-device & private.** No outbound network at runtime; the L3 user model is effectively a psychological profile and must stay in local, user-owned files.
+2. **Privacy-first hybrid model.** Local mode blocks outbound runtime network access except approved first-run downloads. Online API mode is opt-in, visibly labeled, and restricted to the configured provider host. The L3 user model is effectively a psychological profile and must stay in local, user-owned files.
 3. **Cross-platform desktop.** macOS + Windows, including CPU-only Windows machines (slower, must still work).
 4. **Real-time voice UX.** Perceived time-to-first-speech ~1–2.5 s, end-to-end ~3–5 s on a mid laptop — achieved via sentence-queue streaming, not a faster model.
 5. **Python-heavy ecosystem.** LangGraph, ChromaDB, faster-whisper, Kokoro, NeMo, FastEmbed are all Python — the backend is Python; the shell is Tauri.
@@ -40,11 +40,11 @@ These shape every decision downstream:
 
 ## 3. High-level architecture
 
-Three local processes, one machine, no network at runtime.
+Three local processes, one machine, plus optional provider network access only in opt-in online API mode.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│  USER'S MACHINE — all processes local; no network at runtime                 │
+│  USER'S MACHINE — local-first; provider network only in opt-in API mode      │
 │                                                                              │
 │  ┌─────────────────────────────┐                                            │
 │  │ PROCESS 1 — Tauri shell      │   localhost HTTP + WebSocket               │
@@ -53,7 +53,7 @@ Three local processes, one machine, no network at runtime.
 │  │  • insights surface          │   · state · insights            │          │
 │  │  • mic (push-to-talk)        │                                 ▼          │
 │  │  • setup wizard, settings    │                  ┌──────────────────────┐  │
-│  │  • "Offline ✓" indicator     │                  │ PROCESS 2 — Backend   │  │
+│  │  • provider/network status   │                  │ PROCESS 2 — Backend   │  │
 │  └─────────────────────────────┘                  │ (Python / FastAPI)    │  │
 │                                                    │                       │  │
 │   ┌──────────────────────────────────────────┐    │  Conversation engine  │  │
@@ -77,9 +77,9 @@ Three local processes, one machine, no network at runtime.
 │   │ corpus/: user-uploaded books (PDF/md/txt)                               │  │
 │   └────────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
-│   Network guard: blocks all outbound except the explicit first-run download. │
+│   Network guard: local blocks outbound; online allows selected provider only.│
 └────────────────────────────────────────────────────────────────────────────┘
-                              ✗  Internet (nothing crosses at runtime)
+                              ✗/✓  Internet (blocked locally; provider-only online)
 ```
 
 **Why three processes:** the UI must stay responsive (Tauri/Rust), the AI/ML stack is Python (backend), and the model server is a separate native binary with its own lifecycle (llama-server). Keeping them as separate processes isolates crashes — if llama-server dies, the backend restarts it without taking down the UI.
@@ -95,7 +95,7 @@ Three local processes, one machine, no network at runtime.
 | Model server | llama.cpp `llama-server` | Serves Gemma 4 E2B over an OpenAI-compatible endpoint | Spawned & supervised by the backend |
 
 - **Packaging:** Tauri bundles the frontend and ships the backend as a packaged sidecar (PyInstaller or an embedded venv) plus the llama.cpp binaries for the target OS. One installer per platform. *Do a packaging spike in Phase 0 — before any real code — to verify the sidecar mechanism works on the target OS; do not leave this to Phase 15.*
-- **First run:** the setup wizard downloads the model GGUF (the only permitted network call), the Kokoro voice, and the faster-whisper weights into the vault/cache, then verifies them. After that the app is fully offline.
+- **First run:** the setup wizard offers local AI setup or opt-in online API mode. Local setup downloads the model GGUF, the Kokoro voice, and the faster-whisper weights into the vault/cache, then verifies them. After that local mode works offline; online API mode may contact only the configured provider host.
 - **Voice workers** (faster-whisper, Kokoro) are **lazy-loaded on first use**, not at backend startup. On M1 Air 8GB, loading all voice models at startup alongside the model server exhausts available RAM. Load faster-whisper on the first STT request; load Kokoro on the first TTS request; keep them loaded thereafter.
 - **Model serving choice:** `llama-server` over Ollama because it exposes a clean OpenAI-compatible endpoint (clean for both the engine and NeMo), gives explicit control of generation params and thinking-mode, and avoids Ollama's then-current audio crashes. (See §10.)
 - **Exact server command (macOS / M1):**

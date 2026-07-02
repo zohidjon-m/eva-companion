@@ -1,21 +1,26 @@
 # Eva
 
-A fully **offline** desktop AI journaling companion. Tauri (Rust shell) +
-React/Vite frontend + Python FastAPI backend + llama.cpp `llama-server`
-(Gemma 4 E2B). Privacy is a hard law: no telemetry, no analytics, and no
-outbound network calls at runtime — only the first-run model/voice download.
+A privacy-first **hybrid-provider** desktop AI journaling companion. Tauri
+(Rust shell) + React/Vite frontend + Python FastAPI backend + local
+llama.cpp `llama-server` by default, with opt-in online API providers for
+users who choose them. Privacy is a hard law: no telemetry, no analytics, and
+mode-aware network access. Local mode blocks outbound runtime calls except
+explicit first-run model/voice downloads; online API mode permits only the
+selected provider host.
 
-> **Status: Phase 0 (Scaffold).** An empty but running app: Tauri window ↔
-> FastAPI backend over localhost, a `/health` endpoint, the outbound network
-> guard live, and a verified PyInstaller packaging spike. No model or features
-> yet — those arrive in later phases. See `EVA_DEMO_IMPLEMENTATION_PLAN.md`.
+> **Status: mixed implementation / V2 realignment.** The repo is past the
+> original scaffold and includes later UI, memory, voice, and provider surfaces,
+> but the V2 memory foundations are being realigned before L3/L4 work resumes.
+> Canonical plan: `docs/IMPLEMENTATION_PLAN_V2.md`. Realignment bridge:
+> `docs/V2_CODEBASE_REALIGNMENT_PLAN.md`. Provider decision:
+> `docs/decisions/2026-07-01-hybrid-llm-provider.md`.
 
 ## Layout
 
 ```
 backend/            FastAPI app (Python 3.11)
-  app.py            /health endpoint; installs the net guard at import
-  net_guard.py      outbound socket kill-switch (privacy hard law)
+  app.py            provider-aware API routes; installs the net guard at import
+  net_guard.py      mode-aware outbound socket guard (privacy hard law)
   tests/            pytest: health shape + net-guard behavior
 ui/                 React + Vite frontend
   src/App.tsx       status dot that polls /health
@@ -83,19 +88,24 @@ npm run dev                            # http://localhost:1420
 npm run tauri dev
 ```
 
-## First-run model & voice assets (one-time, needs internet)
+## First-run local model & voice assets (one-time, needs internet)
 
-Eva runs **fully offline at runtime** — the backend forces the HuggingFace stack
-offline and the net-guard blocks outbound traffic. So every model weight must be
-downloaded **once** up front, with these out-of-band scripts (they deliberately
-skip the net-guard). Each writes into the vault (`local_vault/models/…`) or the
-HuggingFace cache, so the weights survive offline use:
+In local AI mode, Eva runs offline at runtime after setup. The backend forces
+the HuggingFace stack offline and the net guard blocks non-allowed outbound
+traffic, so local model weights must be downloaded **once** up front with these
+out-of-band scripts. Online API mode skips the local LLM download, but local
+embedding and voice assets are still needed for features that use them. Each
+script writes into the vault (`local_vault/models/…`) or the HuggingFace cache,
+so the weights survive offline use:
 
 ```sh
 cd backend && source .venv/bin/activate     # the scripts use the backend venv
 
-# 1. The LLM (Gemma 4 E2B GGUF) — see scripts/download_model_mac.sh
-bash ../scripts/download_model_mac.sh
+# 1. The LLM (Gemma 4 E2B GGUF) — see scripts/download_model.py
+python ../scripts/download_model.py
+
+# Windows source/dev fallback: downloads the local model and llama.cpp runtime
+powershell -ExecutionPolicy Bypass -File ..\scripts\setup_windows.ps1
 
 # 2. Embedding model (bge-small) — REQUIRED for Library upload + recall.
 #    Without it, uploading a PDF/txt/md fails with "embedding model isn't set up".
@@ -149,11 +159,15 @@ backend/.venv/bin/python scripts/demo_reset.py --yes
 #    backend/tests/test_failure_drills.py.
 backend/.venv/bin/python scripts/demo_drills.py
 
-# 3. Launch in demo mode (optionally reset first), then follow DEMO_SCRIPT.md.
+# 3. Launch in demo mode (optionally reset first), then follow the current V2
+#    plan and realignment notes. A refreshed DEMO_SCRIPT.md is deferred to the
+#    final hardening/demo phase.
 ./run_demo.sh --reset
 ```
 
-- **`DEMO_SCRIPT.md`** — the one-page, 10-beat walkthrough with a fallback per beat.
+- **`docs/IMPLEMENTATION_PLAN_V2.md`** — the canonical V2 build plan.
+- **`docs/V2_CODEBASE_REALIGNMENT_PLAN.md`** — the bridge from this repo state
+  to the V2 target.
 - **`packaging/build_macos.sh`** — builds the `.app`/`.dmg` (needs Rust/`cargo`).
 - **`packaging/CLEAN_MACHINE_CHECKLIST.md`** — verify the bundle cold on a fresh
   macOS account, twice (one run Wi-Fi off), one deliberate failure per category.
@@ -162,8 +176,9 @@ backend/.venv/bin/python scripts/demo_drills.py
 
 `backend/net_guard.py` monkeypatches `socket.connect`/`connect_ex` so any
 outbound connection to a non-loopback host raises `OutboundBlocked` and is
-logged. The single permitted first-run download host is named via the
-`EVA_ALLOW_HOST` environment variable (pre-resolved to its IPs at startup). The
-guard is installed the moment `backend/app.py` is imported — it is **not**
-deferred to a later phase. The "Offline ✓" badge UI is wired in Phase 10; this
-is the truth it will report.
+logged unless the active provider mode explicitly allows it. Local mode permits
+loopback plus the single first-run download host named by `EVA_ALLOW_HOST`
+(pre-resolved to its IPs at startup). Online API mode permits only the selected
+provider host. The guard is installed the moment `backend/app.py` is imported —
+it is **not** deferred to a later phase. The provider/network status UI reports
+this mode-aware policy.
