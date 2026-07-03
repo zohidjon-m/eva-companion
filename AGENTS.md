@@ -78,3 +78,5 @@ Rules:
 7. If anything is ambiguous about data storage, privacy, or Eva's behavior:
    STOP and ask. Do not guess.
 8. End every phase with a git commit: "phase-XX: <title>".
+9. DO not add yourself as a co-author. 
+
