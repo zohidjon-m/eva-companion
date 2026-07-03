@@ -91,6 +91,9 @@ def mem(tmp_path, monkeypatch):
     # Don't load ChromaDB/bge in unit tests — assert embedding is *requested*.
     calls = []
     monkeypatch.setattr(vector, "embed_summary", lambda **kw: calls.append(kw))
+    # Episodes embedding (R4) is also on the done path; default it to a no-op so
+    # these tests don't touch Chroma. The dedicated episode test re-patches it.
+    monkeypatch.setattr(vector, "embed_episodes", lambda **kw: None)
     return capture, db, vault, calls
 
 
@@ -132,6 +135,29 @@ def test_run_extraction_done_finalizes_and_embeds(mem):
     assert len(embed_calls) == 1
     assert embed_calls[0]["entry_id"] == rec.id
     assert embed_calls[0]["themes"] == ["nature", "rest"]
+
+
+def test_run_extraction_also_embeds_episodes(mem, monkeypatch):
+    """R4: the done path embeds open loops + events into ``episodes`` too."""
+    capture, db, vault, _ = mem
+    import memory.vector as vector
+
+    ep_calls = []
+    monkeypatch.setattr(vector, "embed_episodes", lambda **kw: ep_calls.append(kw))
+
+    rec = capture.capture_entry("Hiked Eagle Ridge with Sam.", "journal")
+    status = asyncio.run(capture.run_extraction_and_embed(
+        rec.id, rec.text, rec.date, call_model=make_caller(GOOD_JSON)
+    ))
+    assert status == "done"
+
+    # Episodes embed requested once, with the extraction's units (GOOD_JSON has
+    # no open loops and one event) and the entry's id/metadata.
+    assert len(ep_calls) == 1
+    assert ep_calls[0]["entry_id"] == rec.id
+    assert ep_calls[0]["open_loops"] == []
+    assert ep_calls[0]["events"] == ["hiked eight miles"]
+    assert ep_calls[0]["is_seeded"] is False
 
 
 def test_malformed_model_output_yields_null_stored_but_entry_survives(mem):

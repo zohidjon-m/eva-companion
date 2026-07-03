@@ -407,3 +407,132 @@ def format_memory_context(memories: list[Memory]) -> str:
         return ""
     blocks = [f"[{m.date}] {m.summary.strip()}" for m in memories]
     return "\n\n".join(blocks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Episodes recall (R4). Semantic lookup over open loops + notable events (the
+# ``episodes`` collection), so "the thing I never resolved" or "the day X
+# happened" can be surfaced on its own terms. This provides the read-side seam;
+# the conversation engine (R6/R9) decides when to call it and how to render it.
+# The same anti-fabrication contract as journal recall holds: nothing relevant
+# means an empty list, never an invented episode.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pull a few candidates, keep a small on-point set — same rationale as the
+# journal-recall knobs above.
+EPISODE_N_RESULTS = 6
+EPISODE_TOP_K = 3
+
+# Anti-fabrication gate for episode units. Provisional: mirrors
+# ``MEMORY_MAX_DISTANCE`` deliberately — the plan defers retuning thresholds until
+# there are real episode embeddings to measure against, so this rides the journal
+# gate rather than guessing a separate number. Re-centre once measured.
+EPISODE_MAX_DISTANCE = 0.50
+
+
+@dataclass(frozen=True)
+class Episode:
+    """One recalled episodic unit — an open loop or a notable event.
+
+    ``type`` is ``"open_loop"`` or ``"event"`` (the discriminator stored in the
+    ``episodes`` collection); ``text`` is the embedded unit text. ``distance`` is
+    the cosine distance to the query (kept for the threshold + diagnostics).
+    ``date``/``mood``/``themes`` ride along from the entry the unit came from.
+    """
+
+    entry_id: str
+    date: str
+    type: str
+    text: str
+    mood: int | None
+    themes: list[str]
+    distance: float
+
+    def chip_label(self) -> str:
+        """A short human date for a recall chip, e.g. ``Jun 3`` (falls back to ISO)."""
+        try:
+            d = date.fromisoformat(self.date)
+        except ValueError:
+            return self.date
+        return f"{d.strftime('%b')} {d.day}"
+
+    def as_chip(self) -> dict:
+        """Serialise to the payload a future episodes chip would send the UI."""
+        return {"date": self.date, "label": self.chip_label(), "type": self.type}
+
+
+def _parse_episode_results(raw: dict) -> list[Episode]:
+    """Turn ChromaDB's columnar episodes result into a flat list of Episodes.
+
+    Mirrors :func:`_parse_memory_results` (one query → index 0). ``themes`` was
+    stored comma-joined (Chroma metadata must be scalar; see
+    :func:`vector.embed_episodes`), so it is split back into a list here.
+    """
+    documents = (raw.get("documents") or [[]])[0]
+    metadatas = (raw.get("metadatas") or [[]])[0]
+    distances = (raw.get("distances") or [[]])[0]
+    ids = (raw.get("ids") or [[]])[0]
+
+    episodes: list[Episode] = []
+    for i, (text, meta, distance) in enumerate(zip(documents, metadatas, distances)):
+        meta = meta or {}
+        themes_raw = meta.get("themes") or ""
+        themes = [t.strip() for t in themes_raw.split(",") if t.strip()]
+        entry_id = meta.get("entry_id") or (ids[i] if i < len(ids) else "")
+        episodes.append(
+            Episode(
+                entry_id=entry_id,
+                date=meta.get("date", ""),
+                type=meta.get("type", ""),
+                text=text or "",
+                mood=meta.get("mood"),
+                themes=themes,
+                distance=float(distance),
+            )
+        )
+    return episodes
+
+
+def recall_episodes(
+    query_text: str,
+    *,
+    n_results: int = EPISODE_N_RESULTS,
+    max_distance: float = EPISODE_MAX_DISTANCE,
+    top_k: int = EPISODE_TOP_K,
+) -> list[Episode]:
+    """Return the open loops / notable events relevant to ``query_text``.
+
+    Pulls candidate units from the ``episodes`` collection, drops anything above
+    ``max_distance`` (the anti-fabrication gate), and returns the closest
+    ``top_k``. Unlike journal recall this is not recency-weighted: an open loop's
+    value is often that it is *old and unresolved*, so relevance alone ranks it
+    (recency shaping is deferred with the rest of the read-loop work).
+
+    Returns ``[]`` — never raises — when the query is empty, nothing clears the
+    threshold, or the vector store errors. Seeded demo data is excluded upstream
+    by :func:`vector.recall_episodes`.
+    """
+    if not query_text or not query_text.strip():
+        return []
+
+    try:
+        raw = vector.recall_episodes(query_text, n_results=n_results)
+    except Exception:  # noqa: BLE001 — recall failure must not break the reply
+        log.exception("episode recall failed; continuing with no episodes")
+        return []
+
+    candidates = _parse_episode_results(raw)
+    relevant = [e for e in candidates if e.distance <= max_distance]
+    if not relevant:
+        log.info(
+            "episode recall: %d candidate(s), none above threshold (max_distance=%.2f)",
+            len(candidates), max_distance,
+        )
+        return []
+
+    kept = sorted(relevant, key=lambda e: e.distance)[:top_k]
+    log.info(
+        "episode recall: %d candidate(s), %d relevant, %d kept",
+        len(candidates), len(relevant), len(kept),
+    )
+    return kept

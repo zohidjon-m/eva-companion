@@ -107,6 +107,13 @@ async def run_extraction_and_embed(
                 entry_id=entry_id, date=date, summary=result.summary,
                 mood=result.mood, themes=result.themes, is_seeded=False,
             )
+            # L2 episodes (R4): open loops + notable events get their own vectors so
+            # they're recallable on their own terms, not just via the summary. Same
+            # best-effort contract — a durable entry never hinges on an embed.
+            vector.embed_episodes(
+                entry_id=entry_id, date=date, mood=result.mood, themes=result.themes,
+                open_loops=result.open_loops, events=result.events, is_seeded=False,
+            )
         except Exception as e:  # noqa: BLE001 — embedding is best-effort
             log.error("embedding failed for entry %s (entry still saved): %s", entry_id, e)
 

@@ -773,3 +773,31 @@ def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY e.date ASC
         """
     ).fetchall()
+
+
+def all_done_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return every done extraction (seeded AND real) for the R4 vector rebuild.
+
+    ``scripts/reindex.py`` re-embeds L2 from this: each row carries the fields the
+    ``journals`` summary vector and the ``episodes`` unit vectors are built from —
+    ``date``, ``mood``, ``themes``, ``summary``, ``open_loops``, ``events`` — plus
+    ``is_seeded`` so demo rows are re-embedded with the seed flag set and stay out
+    of live recall exactly as they were before the rebuild.
+    """
+    return conn.execute(
+        """
+        SELECT
+            e.id          AS entry_id,
+            e.date        AS date,
+            e.is_seeded   AS is_seeded,
+            x.mood        AS mood,
+            x.themes      AS themes,
+            x.summary     AS summary,
+            x.open_loops  AS open_loops,
+            x.events      AS events
+        FROM entries e
+        JOIN extractions x ON x.entry_id = e.id
+        WHERE x.extraction_status = 'done'
+        ORDER BY e.date ASC
+        """
+    ).fetchall()

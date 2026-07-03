@@ -270,3 +270,126 @@ def test_memory_max_distance_is_in_a_sane_gating_range():
     # A conservative starting value pending tuning on a real vault (see retrieval.py):
     # tight enough to gate fabrication, loose enough to recall genuine matches.
     assert 0.4 <= retrieval.MEMORY_MAX_DISTANCE <= 0.7
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R4 — episodes recall (open loops + notable events). Same store-mocked
+# discipline: these test the threshold gate, the fail-soft behaviour, and the
+# metadata parsing — never a real ChromaDB.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _episodes(docs, metas, dists):
+    """Build a ChromaDB-shaped episodes result (one query → index 0 lists)."""
+    return {"documents": [docs], "metadatas": [metas], "distances": [dists]}
+
+
+def _ep_meta(entry_id, date_str, unit_type, *, unit_id=0, mood=None, themes="work"):
+    """An episodes-collection metadata row as vector.embed_episodes stores it."""
+    m = {
+        "entry_id": entry_id,
+        "date": date_str,
+        "type": unit_type,
+        "unit_id": unit_id,
+        "themes": themes,
+        "is_seeded": False,
+    }
+    if mood is not None:
+        m["mood"] = mood
+    return m
+
+
+def test_recall_episodes_threshold_drops_irrelevant_units(monkeypatch):
+    # Two near units, one far-off; only those within max_distance survive.
+    raw = _episodes(
+        docs=["call Mom back", "finish the grant draft", "unrelated event"],
+        metas=[
+            _ep_meta("e1", "2026-06-10", "open_loop"),
+            _ep_meta("e2", "2026-06-09", "open_loop"),
+            _ep_meta("e3", "2026-06-08", "event"),
+        ],
+        dists=[0.20, 0.30, 0.90],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall_episodes", lambda q, n_results: raw)
+
+    eps = retrieval.recall_episodes("a relevant message", max_distance=0.40)
+    assert {e.entry_id for e in eps} == {"e1", "e2"}
+
+
+def test_recall_episodes_never_fabricates_when_nothing_relevant(monkeypatch):
+    # The honesty rule carries over: nothing on-topic → no episode at all.
+    raw = _episodes(
+        docs=["a loop about something else"],
+        metas=[_ep_meta("e9", "2026-06-01", "open_loop")],
+        dists=[1.30],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall_episodes", lambda q, n_results: raw)
+    assert retrieval.recall_episodes("a topic never written about") == []
+
+
+def test_recall_episodes_ranks_by_relevance_not_recency(monkeypatch):
+    # Episodes rank by distance alone — an old-but-closer open loop beats a fresher,
+    # weaker one (an unresolved loop's value is often that it is old).
+    raw = _episodes(
+        docs=["older, closer loop", "newer, weaker loop"],
+        metas=[_ep_meta("old", "2026-01-01", "open_loop"),
+               _ep_meta("new", "2026-06-10", "open_loop")],
+        dists=[0.15, 0.40],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall_episodes", lambda q, n_results: raw)
+    eps = retrieval.recall_episodes("message")
+    assert [e.entry_id for e in eps] == ["old", "new"]
+
+
+def test_recall_episodes_keeps_at_most_top_k(monkeypatch):
+    raw = _episodes(
+        docs=[f"u{i}" for i in range(6)],
+        metas=[_ep_meta(f"e{i}", "2026-06-10", "event", unit_id=i) for i in range(6)],
+        dists=[0.10 + i * 0.01 for i in range(6)],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall_episodes", lambda q, n_results: raw)
+    assert len(retrieval.recall_episodes("msg", top_k=3)) == 3
+
+
+def test_recall_episodes_empty_query_does_not_query_store(monkeypatch):
+    called = {"n": 0}
+
+    def spy(q, n_results):
+        called["n"] += 1
+        return _episodes([], [], [])
+
+    monkeypatch.setattr(retrieval.vector, "recall_episodes", spy)
+    assert retrieval.recall_episodes("   ") == []
+    assert called["n"] == 0
+
+
+def test_recall_episodes_store_error_degrades_to_no_episodes(monkeypatch):
+    def boom(q, n_results):
+        raise RuntimeError("chroma down")
+
+    monkeypatch.setattr(retrieval.vector, "recall_episodes", boom)
+    assert retrieval.recall_episodes("anything") == []
+
+
+def test_parse_episode_results_carries_type_and_splits_themes(monkeypatch):
+    raw = _episodes(
+        docs=["call Mom back"],
+        metas=[_ep_meta("e1", "2026-06-10", "open_loop", mood=-1, themes="family, guilt")],
+        dists=[0.20],
+    )
+    monkeypatch.setattr(retrieval.vector, "recall_episodes", lambda q, n_results: raw)
+    eps = retrieval.recall_episodes("msg")
+    assert eps[0].type == "open_loop"
+    assert eps[0].text == "call Mom back"
+    assert eps[0].themes == ["family", "guilt"]
+    assert eps[0].mood == -1
+
+
+def test_episode_chip_label_is_short_human_date():
+    e = retrieval.Episode("e1", "2026-06-03", "event", "hiked", mood=2, themes=["x"], distance=0.2)
+    assert e.chip_label() == "Jun 3"
+    assert e.as_chip() == {"date": "2026-06-03", "label": "Jun 3", "type": "event"}
+
+
+def test_episode_max_distance_is_in_a_sane_gating_range():
+    assert 0.4 <= retrieval.EPISODE_MAX_DISTANCE <= 0.7

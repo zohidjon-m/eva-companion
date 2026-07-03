@@ -184,6 +184,45 @@ def ingest_file(filename: str, data: bytes) -> dict:
     return doc
 
 
+def reindex_all_documents() -> tuple[int, int, int]:
+    """Re-embed every ready corpus document from its stored bytes (R4 rebuild).
+
+    The manifest and the raw files in ``corpus/`` are the source of truth for the
+    library; the ChromaDB ``corpus`` collection is derived. So after a
+    ``chroma/`` delete, this replays load → chunk → index for each ready document
+    (idempotent per ``doc:chunk``). A document whose stored file is missing or no
+    longer loadable is counted as failed and skipped — never raised past here, so
+    one bad file can't abort the whole rebuild.
+
+    Returns ``(docs_reindexed, chunks_indexed, docs_failed)``.
+    """
+    docs = 0
+    chunks = 0
+    failed = 0
+    for doc in _read_manifest():
+        if doc.get("status") != "ready":
+            continue
+        stored = doc.get("stored_filename")
+        path = corpus_dir() / stored if stored else None
+        if path is None or not path.exists():
+            failed += 1
+            log.warning("reindex: stored file missing for %s (%r)", doc.get("id"), stored)
+            continue
+        try:
+            sections = load_document(doc["filename"], path.read_bytes())
+            doc_chunks = chunk_sections(sections)
+            count = vector.index_corpus_chunks(
+                doc_id=doc["id"], source_file=doc["filename"], chunks=doc_chunks
+            )
+            docs += 1
+            chunks += count
+            log.info("reindex: '%s' (%s) → %d chunks", doc["filename"], doc["id"], count)
+        except Exception as e:  # noqa: BLE001 — one bad file must not abort the rebuild
+            failed += 1
+            log.warning("reindex: failed to re-index %s: %s", doc.get("id"), e)
+    return docs, chunks, failed
+
+
 def remove_document(doc_id: str) -> bool:
     """Remove a document: its chunks, its stored bytes, and its manifest entry.
 

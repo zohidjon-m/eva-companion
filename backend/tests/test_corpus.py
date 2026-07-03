@@ -187,6 +187,48 @@ def test_remove_drops_entry_and_deletes_vectors(orch):
     assert corpus.remove_document(doc["id"]) is False  # already gone
 
 
+# --- corpus reindex (R4 rebuild) ------------------------------------------- #
+
+def test_reindex_rebuilds_every_ready_document(orch):
+    corpus, spy = orch
+    a = corpus.ingest_file("a.txt", b"The bowline forms a fixed loop. " * 20)
+    b = corpus.ingest_file("b.txt", b"Two half hitches secure a line. " * 20)
+    spy["indexed"].clear()  # forget the ingest-time indexing; measure the reindex
+
+    docs, chunks, failed = corpus.reindex_all_documents()
+
+    assert docs == 2
+    assert failed == 0
+    assert chunks == a["chunk_count"] + b["chunk_count"]
+    # Both documents were re-indexed from their stored bytes.
+    assert set(spy["indexed"]) == {a["id"], b["id"]}
+
+
+def test_reindex_counts_missing_stored_file_as_failed(orch):
+    corpus, spy = orch
+    doc = corpus.ingest_file("gone.txt", b"content that will lose its stored file " * 10)
+    (corpus.corpus_dir() / doc["stored_filename"]).unlink()  # simulate a missing file
+    spy["indexed"].clear()
+
+    docs, chunks, failed = corpus.reindex_all_documents()
+
+    # The missing file is counted, not raised; nothing was re-indexed.
+    assert (docs, chunks, failed) == (0, 0, 1)
+    assert spy["indexed"] == {}
+
+
+def test_reindex_skips_failed_documents(orch):
+    corpus, spy = orch
+    corpus.ingest_file("broken.pdf", b"%PDF not a real pdf \x00 garbage")  # status=failed
+    spy["indexed"].clear()
+
+    docs, chunks, failed = corpus.reindex_all_documents()
+
+    # A document that never ingested is not a reindex target at all.
+    assert (docs, chunks, failed) == (0, 0, 0)
+    assert spy["indexed"] == {}
+
+
 # --- versioning guard (§6) ------------------------------------------------- #
 
 def test_model_version_mismatch_raises():

@@ -28,6 +28,11 @@ log = logging.getLogger("eva.memory.vector")
 
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 JOURNALS_COLLECTION = "journals"
+# Phase 4 (R4): open loops and notable events extracted per entry get their own
+# semantic sub-index, so recall can find "the thing I never resolved" or "the day
+# X happened" directly, not just the entry summary. One doc per episodic unit,
+# discriminated by a ``type`` in metadata (§7.1's episodes note).
+EPISODES_COLLECTION = "episodes"
 # Phase 6: book chunks live in their own collection, strictly separate from
 # journal summaries (EVA_SYSTEM_DESIGN §6). Same embedding model, different
 # retrieval path — recall never touches corpus; advice never touches journals.
@@ -51,6 +56,7 @@ class EmbeddingModelMismatch(RuntimeError):
 # opens an on-disk store — both expensive, so build them lazily once and reuse.
 _client = None
 _journals = None
+_episodes = None
 _corpus = None
 _embedder = None
 
@@ -245,6 +251,122 @@ def recall(query_text: str, n_results: int = 5, *, include_seeded: bool = False)
 def count() -> int:
     """Return the number of vectors in the journals collection (diagnostics/tests)."""
     return _get_collection().count()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4 (R4) — episodes collection (open loops + notable events). One doc per
+# episodic unit, on a separate collection with its own recall path, so a unit can
+# be found on its own terms rather than only through the entry summary.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The episodic unit kinds embedded here. ``open_loop`` docs carry the loop's
+# description; ``event`` docs carry the event text — both plain strings from L1.
+EPISODE_OPEN_LOOP = "open_loop"
+EPISODE_EVENT = "event"
+
+
+def _get_episodes_collection():
+    """Lazily create/open the persistent ``episodes`` collection (memoised).
+
+    Mirrors ``journals``: precomputed vectors, cosine space, embedding-model name
+    recorded so the versioning guard can catch an incompatible model on reopen.
+    """
+    global _episodes
+    if _episodes is not None:
+        return _episodes
+
+    _episodes = _get_client().get_or_create_collection(
+        name=EPISODES_COLLECTION,
+        metadata={"hnsw:space": "cosine", MODEL_META_KEY: EMBED_MODEL},
+    )
+    _check_model_version(_episodes)
+    return _episodes
+
+
+def embed_episodes(
+    *,
+    entry_id: str,
+    date: str,
+    mood: int | None,
+    themes: list[str],
+    open_loops: list[dict],
+    events: list[str],
+    is_seeded: bool = False,
+) -> int:
+    """Embed one entry's episodic units (open loops + events) into ``episodes``.
+
+    One doc per unit: an open loop's ``description`` or an event string. Each doc
+    id is ``"{entry_id}:{type}:{index}"`` so re-embedding is stable. Metadata is
+    ``{entry_id, date, themes, type, unit_id, is_seeded}`` (§7.1) plus ``mood``
+    when non-NULL — scalars only, so ``themes`` is comma-joined like ``journals``.
+
+    Idempotent per entry: all of the entry's existing units are deleted first,
+    then the current set is upserted. This keeps the index correct when an edit
+    *reduces* the number of units (a stale unit must not linger). Returns the
+    number of units embedded. Does the delete but no insert when there are none.
+    """
+    units: list[tuple[str, str]] = []  # (type, text)
+    for loop in open_loops:
+        text = (loop or {}).get("description")
+        if isinstance(text, str) and text.strip():
+            units.append((EPISODE_OPEN_LOOP, text))
+    for event in events:
+        if isinstance(event, str) and event.strip():
+            units.append((EPISODE_EVENT, event))
+
+    collection = _get_episodes_collection()
+    # Clear the entry's prior units so a shrunk unit set can't leave orphans.
+    collection.delete(where={"entry_id": entry_id})
+    if not units:
+        return 0
+
+    joined_themes = ", ".join(themes)
+    ids: list[str] = []
+    texts: list[str] = []
+    metadatas: list[dict] = []
+    for index, (unit_type, text) in enumerate(units):
+        meta: dict = {
+            "entry_id": entry_id,
+            "date": date,
+            "themes": joined_themes,
+            "type": unit_type,
+            "unit_id": index,
+            "is_seeded": is_seeded,
+        }
+        if mood is not None:
+            meta["mood"] = mood
+        ids.append(f"{entry_id}:{unit_type}:{index}")
+        texts.append(text)
+        metadatas.append(meta)
+
+    collection.upsert(
+        ids=ids,
+        embeddings=_embed(texts),
+        documents=texts,
+        metadatas=metadatas,
+    )
+    log.info("embedded %d episode units for entry %s", len(ids), entry_id)
+    return len(ids)
+
+
+def recall_episodes(
+    query_text: str, n_results: int = 5, *, include_seeded: bool = False
+) -> dict:
+    """Return the nearest episodic units to ``query_text`` (open loops + events).
+
+    Filters out seeded demo data by default (``is_seeded=False``), like journal
+    recall. R6/R9 build the read-loop UX on top of this; it exists here so the
+    episodes path is verifiable end-to-end from the moment it's written.
+    """
+    where = None if include_seeded else {"is_seeded": False}
+    return _get_episodes_collection().query(
+        query_embeddings=_embed_query(query_text), n_results=n_results, where=where
+    )
+
+
+def episodes_count() -> int:
+    """Return the number of vectors in the episodes collection (diagnostics/tests)."""
+    return _get_episodes_collection().count()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
