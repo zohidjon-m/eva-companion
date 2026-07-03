@@ -169,6 +169,96 @@ def insert_entry(
     conn.commit()
 
 
+def upsert_entry_from_l0(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    date: str,
+    type: str,
+    text: str,
+    word_count: int,
+    created_at: str,
+    is_seeded: bool = False,
+) -> str:
+    """Insert or refresh one ``entries`` row from an L0 Markdown turn.
+
+    R3 rebuilds SQLite from Markdown without minting new identities. This helper
+    keeps ``entries.id`` equal to the UID parsed from L0 and reports whether the
+    row was inserted, updated, or already unchanged so the rebuild script can
+    produce an honest summary.
+    """
+    seeded = 1 if is_seeded else 0
+    existing = get_entry(conn, id)
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO entries (id, date, type, text, word_count, is_seeded, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (id, date, type, text, word_count, seeded, created_at),
+        )
+        conn.commit()
+        return "inserted"
+
+    changed = (
+        existing["date"] != date
+        or existing["type"] != type
+        or existing["text"] != text
+        or existing["word_count"] != word_count
+        or existing["is_seeded"] != seeded
+        or existing["created_at"] != created_at
+    )
+    if not changed:
+        return "unchanged"
+
+    conn.execute(
+        """
+        UPDATE entries
+        SET date = ?, type = ?, text = ?, word_count = ?, is_seeded = ?, created_at = ?
+        WHERE id = ?
+        """,
+        (date, type, text, word_count, seeded, created_at, id),
+    )
+    conn.commit()
+    return "updated"
+
+
+def prune_entries_not_in(conn: sqlite3.Connection, entry_ids: set[str]) -> int:
+    """Delete derived ``entries`` rows that no longer exist in L0 Markdown.
+
+    The Markdown vault is the source of truth. During R3, stale DB-only rows must
+    be removed so deleting and rebuilding ``eva.db`` yields the same entry count
+    as the vault. Foreign keys cascade the dependent extraction/mood rows.
+    """
+    if not entry_ids:
+        count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        conn.execute("DELETE FROM entries")
+        conn.commit()
+        return count
+
+    placeholders = ",".join("?" for _ in entry_ids)
+    count = conn.execute(
+        f"SELECT COUNT(*) FROM entries WHERE id NOT IN ({placeholders})",
+        tuple(entry_ids),
+    ).fetchone()[0]
+    conn.execute(
+        f"DELETE FROM entries WHERE id NOT IN ({placeholders})",
+        tuple(entry_ids),
+    )
+    conn.commit()
+    return count
+
+
+def rebuild_entries_fts(conn: sqlite3.Connection) -> None:
+    """Rebuild the external-content FTS table from the current ``entries`` rows.
+
+    ``entries_fts`` has no triggers in the current schema, so R3 must explicitly
+    refresh it after upserting/pruning entries.
+    """
+    conn.execute("INSERT INTO entries_fts(entries_fts) VALUES ('rebuild')")
+    conn.commit()
+
+
 def update_entry_text(
     conn: sqlite3.Connection, entry_id: str, *, text: str, word_count: int
 ) -> None:
@@ -279,6 +369,21 @@ def create_pending_extraction(
     return ext_id
 
 
+def ensure_pending_extraction(
+    conn: sqlite3.Connection, entry_id: str, *, source_hash: str | None = None
+) -> bool:
+    """Ensure an entry has one extraction row before R3 processing.
+
+    Capture normally creates the row synchronously, but a database rebuilt from
+    Markdown may not have it yet. Returns ``True`` when a new pending row was
+    created and ``False`` when an extraction row already existed.
+    """
+    if get_extraction(conn, entry_id) is not None:
+        return False
+    create_pending_extraction(conn, entry_id, source_hash=source_hash)
+    return True
+
+
 def finalize_extraction(
     conn: sqlite3.Connection,
     entry_id: str,
@@ -348,6 +453,18 @@ def mark_null_stored(
         """
         UPDATE extractions
         SET extraction_status='null_stored',
+            mood=NULL,
+            emotions=NULL,
+            entities=NULL,
+            themes=NULL,
+            events=NULL,
+            stated_goals=NULL,
+            behaviors=NULL,
+            decisions=NULL,
+            open_loops=NULL,
+            self_judgments=NULL,
+            summary=NULL,
+            extracted_at=NULL,
             source_hash=COALESCE(?, source_hash)
         WHERE entry_id=?
         """,
@@ -458,6 +575,45 @@ def upsert_mood_series(
     included deliberately because §7.1 and Phase 12 both specify that extraction —
     not a later phase — populates this table. No LLM is involved.
     """
+    conn.execute(
+        """
+        INSERT INTO mood_series (id, entry_id, date, mood, emotions, is_seeded)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()), entry_id, date, mood,
+            json.dumps(emotions, ensure_ascii=False), 1 if is_seeded else 0,
+        ),
+    )
+    conn.commit()
+
+
+def delete_mood_series(conn: sqlite3.Connection, entry_id: str) -> int:
+    """Remove derived mood points for one entry and return the row count.
+
+    R3 calls this when an extraction fails so stale mood data cannot survive a
+    changed source entry.
+    """
+    cur = conn.execute("DELETE FROM mood_series WHERE entry_id = ?", (entry_id,))
+    conn.commit()
+    return cur.rowcount
+
+
+def replace_mood_series(
+    conn: sqlite3.Connection,
+    *,
+    entry_id: str,
+    date: str,
+    mood: int | None,
+    emotions: list,
+    is_seeded: bool = False,
+) -> None:
+    """Replace the derived mood point for one entry idempotently.
+
+    Re-extraction can revisit the same entry many times. Replacing rather than
+    appending keeps ``mood_series`` a rebuildable view over the latest L1 row.
+    """
+    conn.execute("DELETE FROM mood_series WHERE entry_id = ?", (entry_id,))
     conn.execute(
         """
         INSERT INTO mood_series (id, entry_id, date, mood, emotions, is_seeded)

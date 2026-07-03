@@ -91,7 +91,7 @@ async def run_extraction_and_embed(
                 summary=result.summary, extracted_at=result.extracted_at,
                 source_hash=source_hash,
             )
-            db.upsert_mood_series(
+            db.replace_mood_series(
                 conn, entry_id=entry_id, date=date,
                 mood=result.mood, emotions=result.emotions,
             )
