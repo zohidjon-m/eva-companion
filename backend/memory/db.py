@@ -856,6 +856,37 @@ def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def recent_episodes(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    """Return the newest ``limit`` real (non-seeded) done extractions, newest first.
+
+    The R6 read loop assembles these as the chronological "recent L1 episodes"
+    context — the "what's been on their mind lately" baseline (EVA_SYSTEM_DESIGN
+    §7.1), distinct from the relevance-ranked recall in :func:`retrieval.recall_memories`.
+    Each row carries what the context block needs: ``entry_id``, ``date``, ``mood``,
+    ``themes`` (JSON), and the 4–5 sentence ``summary``. Only ``done`` extractions
+    are returned (a ``pending``/``null_stored`` row has no summary to show), and
+    seeded demo rows are excluded so recency is built from the user's real entries,
+    exactly as recall excludes them. Ordered by capture time so "lately" means
+    lately, not by day-file date alone.
+    """
+    return conn.execute(
+        """
+        SELECT
+            e.id        AS entry_id,
+            e.date      AS date,
+            x.mood      AS mood,
+            x.themes    AS themes,
+            x.summary   AS summary
+        FROM entries e
+        JOIN extractions x ON x.entry_id = e.id
+        WHERE e.is_seeded = 0 AND x.extraction_status = 'done'
+        ORDER BY e.created_at DESC, e.rowid DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
 def all_done_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Return every done extraction (seeded AND real) for the R4 vector rebuild.
 

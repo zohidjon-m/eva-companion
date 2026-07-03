@@ -52,6 +52,9 @@ def _setup(monkeypatch, recorder):
     # stub it off so no memory block leaks into the prompt and no memory frame
     # appears on the wire (recall has its own tests in test_retrieval.py).
     monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [])
+    # Recent-episode assembly (R6) also runs every turn and reads the DB; stub it
+    # off so these persona/history tests see only the persona + history wiring.
+    monkeypatch.setattr(retrieval, "recent_episodes", lambda *a, **k: [])
 
 
 def _drain(ws):
@@ -67,6 +70,8 @@ def _drain(ws):
             raise AssertionError(f"unexpected chat error: {frame}")
         if frame["type"] == "done":
             break
+        if frame["type"] == "meta":
+            continue
         assert frame["type"] == "token"
         out.append(frame["content"])
     return "".join(out)

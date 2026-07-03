@@ -1,11 +1,13 @@
-"""Phase 7 — RAG wiring in the /chat socket (model, capture, vector mocked).
+"""R6 — RAG wiring in the /chat socket (model, capture, vector mocked).
 
-Asserts the listen-first contract end to end at the socket boundary:
-  * a venting turn never calls retrieval and sends no citations frame;
-  * a question turn retrieves, injects the passages + grounding rule into the
-    system prompt, and emits a citations frame before the tokens;
-  * a question with no relevant passage retrieves but cites nothing (no frame),
-    so Eva can be honest about the gap without a fabricated source.
+Asserts the listen-first contract end to end at the socket boundary, now via the
+engine pipeline:
+  * vent / process / ambient turns never call retrieval and send no citations;
+  * an ask_info / ask_advice turn retrieves, injects the passages + grounding rule
+    into the system prompt, and emits a citations frame;
+  * an ask_info turn with no relevant passage retrieves but cites nothing (no
+    frame), so Eva can be honest about the gap without a fabricated source;
+  * every turn emits a ``meta`` frame carrying the intent/persona/retrieval counts.
 """
 
 from __future__ import annotations
@@ -59,11 +61,12 @@ def _setup(monkeypatch, recorder, *, passages):
         return passages
 
     monkeypatch.setattr(retrieval, "retrieve_corpus", spy_retrieve)
-    # Phase 11 memory recall runs on every turn but is independent of the corpus
-    # gate under test here; stub it off so these tests see only the corpus path
-    # (no memory frame, no memory block in the prompt). Recall is covered in
-    # test_retrieval.py.
+    # Memory recall and recent-episode assembly run on every turn but are
+    # independent of the corpus gate under test here; stub them off so these tests
+    # see only the corpus path. Recall is covered in test_retrieval.py; recent
+    # episodes in test_engine_turn.py.
     monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [])
+    monkeypatch.setattr(retrieval, "recent_episodes", lambda *a, **k: [])
 
 
 def _drain(ws):
@@ -80,6 +83,8 @@ def _drain(ws):
             raise AssertionError(f"unexpected chat error: {frame}")
         if frame["type"] == "done":
             break
+        if frame["type"] == "meta":
+            continue
         if frame["type"] == "citations":
             citations = frame["citations"]
             continue
@@ -103,7 +108,34 @@ def test_vent_turn_bypasses_retrieval(monkeypatch):
     assert "Passages from their library" not in rec["messages"][0]["content"]
 
 
-def test_question_turn_retrieves_grounds_and_cites(monkeypatch):
+def test_process_turn_bypasses_retrieval(monkeypatch):
+    # A reflective "process" turn is still listen-first — no corpus, no citations.
+    rec: dict = {}
+    _setup(monkeypatch, rec, passages=[])
+    client = TestClient(app)
+    with client.websocket_connect("/chat") as ws:
+        ws.send_text("I keep coming back to why that day bothered me so much.")
+        _, citations = _drain(ws)
+
+    assert rec.get("retrieve_calls") is None
+    assert citations is None
+    assert "Passages from their library" not in rec["messages"][0]["content"]
+
+
+def test_ambient_turn_bypasses_retrieval(monkeypatch):
+    # A greeting/ack carries nothing to retrieve for.
+    rec: dict = {}
+    _setup(monkeypatch, rec, passages=[])
+    client = TestClient(app)
+    with client.websocket_connect("/chat") as ws:
+        ws.send_text("thanks so much")
+        _, citations = _drain(ws)
+
+    assert rec.get("retrieve_calls") is None
+    assert citations is None
+
+
+def test_ask_info_turn_retrieves_grounds_and_cites(monkeypatch):
     passage = retrieval.Passage(
         text="Patience is repeatedly praised.",
         source_file="book.pdf", page=42, section=None, distance=0.2,
@@ -133,6 +165,23 @@ def test_question_turn_retrieves_grounds_and_cites(monkeypatch):
     ]
 
 
+def test_ask_advice_turn_retrieves(monkeypatch):
+    # An explicit ask for guidance opens the corpus gate exactly like ask_info.
+    passage = retrieval.Passage(
+        text="Rest is a discipline, not a reward.",
+        source_file="book.pdf", page=7, section=None, distance=0.2,
+    )
+    rec: dict = {}
+    _setup(monkeypatch, rec, passages=[passage])
+    client = TestClient(app)
+    with client.websocket_connect("/chat") as ws:
+        ws.send_text("What should I do to rest without feeling guilty?")
+        _, citations = _drain(ws)
+
+    assert rec["retrieve_calls"] == ["What should I do to rest without feeling guilty?"]
+    assert citations is not None and citations[0]["source_file"] == "book.pdf"
+
+
 def test_question_with_no_match_cites_nothing(monkeypatch):
     rec: dict = {}
     _setup(monkeypatch, rec, passages=[])  # retrieval finds nothing relevant
@@ -148,7 +197,26 @@ def test_question_with_no_match_cites_nothing(monkeypatch):
     assert "Passages from their library" not in rec["messages"][0]["content"]
 
 
-# ── Phase 11: memory recall wiring at the socket boundary ────────────────────
+# ── meta frame (intent / persona / retrieval counts) ─────────────────────────
+
+
+def test_meta_frame_carries_intent_and_persona(monkeypatch):
+    rec: dict = {}
+    _setup(monkeypatch, rec, passages=[])
+    client = TestClient(app)
+    with client.websocket_connect("/chat") as ws:
+        ws.send_text('{"text": "I am so drained lately.", "mode": "coach"}')
+        assert ws.receive_json() == {"type": "start"}
+        meta = ws.receive_json()
+
+    assert meta["type"] == "meta"
+    assert meta["intent"] == intent_classifier.VENT
+    assert meta["method"] == "rule"
+    assert meta["persona"] == "coach"
+    assert meta["retrieved"] == {"corpus": 0, "memory": 0, "episodes": 0}
+
+
+# ── memory recall wiring at the socket boundary ──────────────────────────────
 
 
 def _drain_with_memory(ws):
@@ -165,6 +233,8 @@ def _drain_with_memory(ws):
             raise AssertionError(f"unexpected chat error: {frame}")
         if frame["type"] == "done":
             break
+        if frame["type"] == "meta":
+            continue
         if frame["type"] == "citations":
             citations = frame["citations"]
             continue
@@ -216,4 +286,4 @@ def test_no_recall_means_no_memory_frame_or_block(monkeypatch):
 
     assert citations is None
     assert memories is None
-    assert "Context from past journal entries" not in rec["messages"][0]["content"]
+    assert "shared with you before" not in rec["messages"][0]["content"]

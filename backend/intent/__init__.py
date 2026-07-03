@@ -6,7 +6,9 @@ actually asking for information or guidance. That gate lives here, not in the
 prompt — if a venting turn never retrieves, the model literally cannot reach for
 a passage to advise from.
 
-Phase 7 ships a minimal three-class classifier (``vent`` / ``question`` /
-``advice_request``). It is deliberately small and behind a clearly-marked seam so
-the real five-class intent engine plugs in later without touching the call site.
+R6 aligns this to the V2 five-class taxonomy (``vent`` / ``process`` /
+``ask_info`` / ``ask_advice`` / ``ambient``, EVA_SYSTEM_DESIGN §5.11). A cheap
+deterministic rule layer resolves the vast majority of turns; only a genuinely
+ambiguous residue falls through to one small model call. The rest of the app
+depends only on ``IntentResult.label`` / ``.retrieves``.
 """

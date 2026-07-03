@@ -3,7 +3,7 @@
 This module owns both read-side retrievals that feed the chat prompt:
 
   * **Corpus retrieval** (Phase 7) — the read half of the RAG story. Given a
-    message the intent gate decided is a ``question``/``advice_request``, it pulls
+    message the intent gate decided is an ``ask_info``/``ask_advice`` turn, it pulls
     the nearest corpus chunks, keeps those above a relevance threshold, and
     packages each with its source locator for a citation chip.
   * **Memory recall** (Phase 11) — "Eva remembers". On *every* turn it pulls the
@@ -19,8 +19,8 @@ intent rule, §5.9). They never mix.
 The corpus half is documented immediately below; memory recall has its own
 section header further down.
 
-Given a user message the intent gate has already decided is
-a ``question`` or ``advice_request``, corpus retrieval pulls the nearest corpus
+Given a user message the intent gate has already decided is an
+``ask_info`` or ``ask_advice`` turn, corpus retrieval pulls the nearest corpus
 chunks, keeps only those above a relevance threshold, and packages each with the
 source locator (file + page/section) that Phase 6 stored on the chunk.
 
@@ -44,13 +44,20 @@ demo without touching call sites.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date
 
-from . import vector
+from . import db, vector
 
 log = logging.getLogger("eva.memory.retrieval")
+
+# How many recent L1 episodes to assemble into the chronological "lately" context
+# (the read-loop baseline, EVA_SYSTEM_DESIGN §7.1). Small on purpose: a few recent
+# summaries keep Eva oriented without flooding the 8k chat budget or drowning the
+# relevance-ranked recall that sits alongside it.
+RECENT_EPISODES_LIMIT = 3
 
 # How many candidate chunks to pull before threshold filtering.
 DEFAULT_N_RESULTS = 4
@@ -406,6 +413,90 @@ def format_memory_context(memories: list[Memory]) -> str:
     if not memories:
         return ""
     blocks = [f"[{m.date}] {m.summary.strip()}" for m in memories]
+    return "\n\n".join(blocks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Recent L1 episodes (R6). The chronological "what's been on their mind lately"
+# baseline the read loop assembles on every turn (EVA_SYSTEM_DESIGN §7.1). Unlike
+# recall_memories (relevance-ranked over the vector store), this is a straight
+# newest-first read of the L1 extractions — so Eva stays oriented to the last few
+# entries even when the current message doesn't semantically match any of them.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RecentEpisode:
+    """One recent L1 episode: a past entry's summary, in chronological context.
+
+    ``date`` is the entry's day (``YYYY-MM-DD``); ``summary`` is the 4–5 sentence
+    extraction summary. ``mood`` and ``themes`` ride along from L1 for possible
+    future use; the context block uses date + summary today. ``entry_id`` lets the
+    read loop de-duplicate against a relevance recall of the same entry. (Named
+    apart from the R4 :class:`Episode`, which is a semantic open-loop/event unit.)
+    """
+
+    entry_id: str
+    date: str
+    summary: str
+    mood: int | None
+    themes: list[str]
+
+
+def recent_episodes(*, limit: int = RECENT_EPISODES_LIMIT) -> list[RecentEpisode]:
+    """Return the user's most recent L1 episodes, newest first.
+
+    A straight chronological read of the newest ``limit`` real ``done`` extractions
+    (:func:`db.recent_episodes`) — no relevance gate, because "lately" is about
+    recency, not similarity. Returns ``[]`` — never raises — when there are no real
+    extractions yet or the store errors, so a brand-new vault simply carries no
+    recent-episode context rather than crashing the reply.
+    """
+    try:
+        conn = db.get_or_create_db()
+        try:
+            rows = db.recent_episodes(conn, limit)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — episode assembly must not break the reply
+        log.exception("recent-episode read failed; continuing with none")
+        return []
+
+    episodes: list[RecentEpisode] = []
+    for row in rows:
+        summary = (row["summary"] or "").strip()
+        if not summary:
+            continue
+        try:
+            themes = json.loads(row["themes"]) if row["themes"] else []
+        except (json.JSONDecodeError, TypeError):
+            themes = []
+        episodes.append(
+            RecentEpisode(
+                entry_id=row["entry_id"],
+                date=row["date"] or "",
+                summary=summary,
+                mood=row["mood"],
+                themes=themes if isinstance(themes, list) else [],
+            )
+        )
+    if episodes:
+        log.info(
+            "recent episodes: %d assembled (%s)",
+            len(episodes), ", ".join(e.date for e in episodes),
+        )
+    return episodes
+
+
+def format_episodes_context(episodes: list[RecentEpisode]) -> str:
+    """Render recent episodes into the ``{episodes_context}`` prompt slot text.
+
+    Newest first, each prefixed with its date so Eva can place it in time. Returns
+    ``""`` for an empty list, which the assembler drops. De-duplication against the
+    relevance recall happens upstream (the read loop filters ``episodes`` before
+    calling this), so what is rendered here is exactly what the count reports.
+    """
+    blocks = [f"[{e.date}] {e.summary}" for e in episodes]
     return "\n\n".join(blocks)
 
 

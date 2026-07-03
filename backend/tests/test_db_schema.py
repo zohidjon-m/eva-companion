@@ -231,3 +231,42 @@ def test_init_db_idempotent(db):
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0]
     assert count >= len(EXPECTED_COLUMNS)
+
+
+# ── R6: recent_episodes (chronological "lately" read) ────────────────────────
+
+
+def _add_done_entry(db_mod, conn, *, id, date, created_at, summary, is_seeded=False):
+    """Insert one entry with a finalized ('done') extraction carrying ``summary``."""
+    db_mod.insert_entry(
+        conn, id=id, date=date, type="journal", text="t",
+        word_count=1, created_at=created_at, is_seeded=is_seeded,
+    )
+    db_mod.create_pending_extraction(conn, id)
+    db_mod.finalize_extraction(
+        conn, id, mood=1, emotions=[], entities=[], themes=["home"], events=[],
+        stated_goals=[], behaviors=[], decisions=[], open_loops=[],
+        self_judgments=[], summary=summary, extracted_at=created_at,
+    )
+
+
+def test_recent_episodes_newest_first_real_and_done_only(db):
+    db_mod, conn = db
+    _add_done_entry(db_mod, conn, id="e1", date="2026-06-01",
+                    created_at="2026-06-01T00:00:00", summary="first")
+    _add_done_entry(db_mod, conn, id="e2", date="2026-06-02",
+                    created_at="2026-06-02T00:00:00", summary="second")
+    # A seeded row (demo data) is excluded, like recall excludes it.
+    _add_done_entry(db_mod, conn, id="seed", date="2026-06-03",
+                    created_at="2026-06-03T00:00:00", summary="seeded", is_seeded=True)
+    # A pending row has no summary yet and must be excluded.
+    db_mod.insert_entry(conn, id="p1", date="2026-06-04", type="journal",
+                        text="t", word_count=1, created_at="2026-06-04T00:00:00")
+    db_mod.create_pending_extraction(conn, "p1")
+
+    rows = db_mod.recent_episodes(conn, 10)
+    assert [r["entry_id"] for r in rows] == ["e2", "e1"]  # newest first
+    assert rows[0]["summary"] == "second"
+
+    # The limit is honored.
+    assert [r["entry_id"] for r in db_mod.recent_episodes(conn, 1)] == ["e2"]

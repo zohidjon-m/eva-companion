@@ -62,6 +62,22 @@ export type Memory = {
   label: string;
 };
 
+/**
+ * Per-turn engine metadata (R6): the classified intent, how it was decided, the
+ * active persona, and what got retrieved. Streamed up front so the turn is
+ * auditable; consumed by the Phase-21 debug panel. Not rendered on its own yet.
+ */
+export type TurnMeta = {
+  /** vent | process | ask_info | ask_advice | ambient (or null if unknown). */
+  intent: string | null;
+  /** How intent was decided: "rule" or "model". */
+  method: string | null;
+  /** The persona/mode this turn ran as: friend | coach | mentor. */
+  persona: string;
+  /** Counts of what reached the context window this turn. */
+  retrieved: { corpus: number; memory: number; episodes: number };
+};
+
 export type Message = {
   id: string;
   role: ChatRole;
@@ -74,10 +90,13 @@ export type Message = {
   citations?: Citation[];
   /** Past entries Eva recalled for this turn (absent when nothing was recalled). */
   memories?: Memory[];
+  /** Engine metadata for this turn (intent/persona/retrieval); feeds the debug panel. */
+  meta?: TurnMeta;
 };
 
 type ServerFrame =
   | { type: "start" }
+  | { type: "meta"; intent: string | null; method: string | null; persona: string; retrieved: { corpus: number; memory: number; episodes: number } }
   | { type: "citations"; citations: Citation[] }
   | { type: "memory"; memories: Memory[] }
   | { type: "token"; content: string }
@@ -181,6 +200,17 @@ export function useChat(voice?: VoiceWiring, mode: string = "friend"): UseChat {
     );
   };
 
+  // Attach the turn's engine metadata (intent/persona/retrieval) to the live Eva
+  // bubble (arrives right after `start`, before the first token). Not rendered on
+  // its own yet — it's the data the Phase-21 debug panel will read off the message.
+  const attachMeta = (meta: TurnMeta) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === streamingId.current ? { ...m, meta } : m,
+      ),
+    );
+  };
+
   // End the current stream. Targets the live bubble by its `streaming` flag
   // (there is only ever one) rather than an id, so it stays correct even if a
   // superseded socket fires late. On failure an empty Eva bubble (the error
@@ -235,6 +265,14 @@ export function useChat(voice?: VoiceWiring, mode: string = "friend"): UseChat {
       switch (frame.type) {
         case "start":
           break; // placeholder bubble already shows the typing indicator
+        case "meta":
+          attachMeta({
+            intent: frame.intent,
+            method: frame.method,
+            persona: frame.persona,
+            retrieved: frame.retrieved,
+          });
+          break;
         case "citations":
           attachCitations(frame.citations);
           break;

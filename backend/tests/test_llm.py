@@ -207,6 +207,10 @@ def test_ws_chat_streams_tokens(monkeypatch):
                 raise AssertionError(f"unexpected chat error: {frame}")
             if frame["type"] == "done":
                 break
+            # R6 adds pre-stream metadata frames (meta, and memory when recall
+            # hits); this test asserts only the token protocol, so skip the rest.
+            if frame["type"] in ("meta", "memory", "citations"):
+                continue
             assert frame["type"] == "token"
             tokens.append(frame["content"])
     assert "".join(tokens) == "Hello, there!"

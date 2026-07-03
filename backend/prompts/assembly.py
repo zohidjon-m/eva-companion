@@ -1,17 +1,18 @@
-"""System-prompt assembly — fill four named slots, never hand-concatenate.
+"""System-prompt assembly — fill named slots, never hand-concatenate.
 
 Phase 4 introduces the ONE place Eva's chat system prompt is built. The prompt is
-composed from four slots, each kept as a *separate string* so a later phase can
-fill one without disturbing the others or doing prompt surgery in the WebSocket
-handler:
+composed from a persona block plus context slots, each kept as a *separate string*
+so a phase can fill one without disturbing the others or doing prompt surgery in
+the read loop:
 
-    {persona_block}   Eva's identity + voice, loaded verbatim from eva_system.md.
-                      The interim crisis-care addendum (safety/crisis_check.py) is
-                      appended to THIS slot before assembly, so care travels with
-                      the persona rather than as a detached instruction block.
-    {memory_context}  Past journal entries Eva may reference.  Empty until Phase 11.
-    {profile_slices}  What Eva knows about the user.            Empty until Phase 13.
-    {corpus_context}  Passages from the user's library.         Empty until Phase 7.
+    {persona_block}    Eva's identity + voice, loaded verbatim from eva_system.md.
+                       The interim crisis-care addendum (safety/crisis_check.py) is
+                       appended to THIS slot before assembly, so care travels with
+                       the persona rather than as a detached instruction block.
+    {episodes_context} Recent L1 episodes — the chronological "lately" baseline. R6.
+    {memory_context}   Relevance-recalled past entries Eva may reference. Phase 11.
+    {profile_slices}   What Eva knows about the user.                     Phase 13.
+    {corpus_context}   Passages from the user's library.                  Phase 7.
 
 Because the slots are explicit parameters (and empty ones are simply dropped),
 "give Eva memory" or "give Eva the profile" later is a one-line change here — not
@@ -131,6 +132,7 @@ GROUNDING_RULE = (
 # data feed, so the context informs Eva's reply instead of tipping her into a
 # report-reading register (the #7 "doesn't feel like a close friend" fix).
 _CONTEXT_SLOTS: tuple[tuple[str, str], ...] = (
+    ("episodes_context", "What's been on their mind lately, from their recent entries — so you're already caught up, the way a close friend is; don't recap it back:"),
     ("memory_context", "Things they've shared with you before — bring any of it up only if it naturally fits, the way a friend remembers, never as a recap:"),
     ("profile_slices", "What you already know about them, so you can talk like someone who actually knows them (don't list it back):"),
     ("corpus_context", f"Passages from their library. {GROUNDING_RULE}"),
@@ -162,20 +164,22 @@ def load_persona() -> str:
 def assemble_system_prompt(
     *,
     persona_block: str,
+    episodes_context: str = "",
     memory_context: str = "",
     profile_slices: str = "",
     corpus_context: str = "",
 ) -> str:
-    """Compose the system prompt from the four slots, dropping empty ones.
+    """Compose the system prompt from the context slots, dropping empty ones.
 
     The persona block always leads. Each non-empty context slot is appended below
-    it under a short header so the model can tell memories from profile from
-    library passages. Empty slots (the resting state in Phase 4) contribute
-    nothing — the assembled prompt is just the persona until later phases fill a
-    slot. Slots are never concatenated by the caller; this function owns the glue.
+    it under a short header so the model can tell recent episodes from relevance
+    recall from profile from library passages. Empty slots contribute nothing — the
+    assembled prompt is just the persona until a slot is filled. Slots are never
+    concatenated by the caller; this function owns the glue.
     """
     parts = [persona_block.strip()]
     values = {
+        "episodes_context": episodes_context,
         "memory_context": memory_context,
         "profile_slices": profile_slices,
         "corpus_context": corpus_context,
@@ -196,6 +200,7 @@ def build_chat_system_prompt(
     *,
     mode: str | None = DEFAULT_CHAT_MODE,
     persona_addendum: str = "",
+    episodes_context: str = "",
     memory_context: str = "",
     profile_slices: str = "",
     corpus_context: str = "",
@@ -207,14 +212,15 @@ def build_chat_system_prompt(
     text, when the message tripped the keyword scan), and assembles it with
     whatever context slots are populated. Both addenda ride on the persona block,
     so Eva's core identity and voice always lead. This is the entry point the
-    ``/chat`` handler calls; ``assemble_system_prompt`` stays a pure function for
-    easy testing.
+    read loop calls; ``assemble_system_prompt`` stays a pure function for easy
+    testing.
     """
     persona = load_persona()
     addenda = [a for a in (mode_addendum(mode), persona_addendum.strip()) if a]
     persona_block = "\n\n".join([persona, *addenda]) if addenda else persona
     return assemble_system_prompt(
         persona_block=persona_block,
+        episodes_context=episodes_context,
         memory_context=memory_context,
         profile_slices=profile_slices,
         corpus_context=corpus_context,

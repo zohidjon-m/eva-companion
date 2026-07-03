@@ -59,10 +59,10 @@ from memory import growth as growth_l4
 # GET/PUT /profile (profile.md ↔ profile.json sync). # DEMO-STUB until the L3 engine.
 from memory import profile
 
-# Phase 7 RAG: the intent gate (listen-first — only question/advice_request pull
-# the corpus) and corpus retrieval (relevant, cited passages or nothing).
-from intent import classifier as intent_classifier
-from memory import retrieval
+# R6 conversation engine: the read-loop state machine (classify → assemble_context
+# → check_in → reason → check_out → persist). It owns the listen-first gate and the
+# context assembly; this socket owns I/O (frames, capture, history, voice).
+import engine
 
 # Phase 1 LLM runtime: the model-server supervisor and the async client.
 from llm import client as llm_client
@@ -70,10 +70,9 @@ from llm import download as llm_download
 from llm import providers as llm_providers
 from llm import server as llm_server
 
-# Phase 4 chat surface: prompt assembly (the four template slots) + the interim
-# keyword crisis-care floor that runs before the prompt reaches the model.
+# Phase 4 chat surface: prompt assembly (the named template slots). The interim
+# keyword crisis-care floor now runs inside the engine's check_in step.
 from prompts import assembly
-from safety import crisis_check
 
 # Phase 6 Library: corpus ingestion (save → load → chunk → embed → index) and the
 # document manifest the Library screen lists from.
@@ -441,22 +440,6 @@ def _capture_user_turn(text: str) -> None:
     asyncio.create_task(capture.run_extraction_and_embed(rec.id, rec.text, rec.date))
 
 
-def _compose_messages(system_prompt: str, history: list[dict], user_text: str) -> list[dict]:
-    """Build the OpenAI ``messages`` list, folding the system prompt into turn 1.
-
-    The session ``history`` (alternating user/assistant turns) plus the new user
-    turn form the body. Rather than send a separate ``system`` role — which the
-    gemma-4 GGUF's embedded chat template does not accept — the system prompt is
-    prepended to the *first* message in the window (always a user turn). This is
-    template-agnostic and keeps Eva's persona present even after the oldest turns
-    age out of the window.
-    """
-    turns = [*history, {"role": "user", "content": user_text}]
-    first = turns[0]
-    turns[0] = {**first, "content": f"{system_prompt}\n\n{first['content']}"}
-    return turns
-
-
 @app.websocket("/chat")
 async def chat_ws(ws: WebSocket) -> None:
     """Streaming chat socket: receive a turn, stream Eva's tokens back.
@@ -467,22 +450,22 @@ async def chat_ws(ws: WebSocket) -> None:
       ← ``{"type":"done"}`` when the reply completes
       ← ``{"type":"error","code":…,"message":…}`` on any failure
 
-    Phase 4 wraps the Phase-1 stream with the real chat surface; Phase 7 adds the
-    listen-first RAG gate to it:
+    R6 restructures the turn into the conversation-engine pipeline (:mod:`engine`):
+    the socket captures the turn, then drives the ordered steps over one TurnState.
       1. Capture the user's turn (vault + L1) before anything else.
-      2. Run the interim keyword crisis-care scan over the user's text.
-      3. Classify intent (vent/question/advice_request). Only question and
-         advice_request pull corpus passages; vent bypasses retrieval entirely so
-         Eva literally has nothing to advise from (EVA_MEMORY_ARCHITECTURE §5.9).
-         (Phase 11) Independently, recall the nearest past journal summaries above
-         a relevance threshold (recency-weighted) into the memory slot — on every
-         turn, since remembering the user's own entries is listening, not advice.
-      4. Assemble the system prompt from the four template slots
-         (:mod:`prompts.assembly`), appending the crisis addendum on a match and
-         the retrieved passages (with the grounding rule) in the corpus slot.
-      5. If passages were retrieved, send a ``citations`` frame so the UI can show
-         source chips; then stream the reply, capped at 450 tokens, with this
-         session's history for multi-turn coherence.
+      2. ``engine.classify`` — intent (vent/process/ask_info/ask_advice/ambient);
+         only ask_info/ask_advice pull corpus passages, so vent/process/ambient
+         bypass retrieval entirely and Eva has nothing to advise from
+         (EVA_MEMORY_ARCHITECTURE §5.9).
+      3. ``engine.assemble_context`` — recent L1 episodes + relevance recall +
+         profile slices on every turn (concurrently), plus corpus passages only for
+         a retrieving intent.
+      4. ``engine.check_in`` — the crisis-care input seam, then the system prompt +
+         messages assembly.
+      5. Emit ``start`` + a ``meta`` frame (intent/persona/debug) + a ``memory``
+         chip, then ``engine.reason`` streams the reply (capped at 450 tokens) with
+         this session's history. ``engine.check_out`` validates citations before the
+         ``citations`` frame is sent.
       6. (Phase 9) If the turn asked for voice, a :class:`VoiceStream` splits the
          streamed reply at §7.5 sentence boundaries and emits ordered ``audio``
          frames over this same socket alongside the text; ``audio_done`` follows
@@ -564,113 +547,57 @@ async def chat_ws(ws: WebSocket) -> None:
                 )
                 continue
 
-            # 2. Interim crisis-care scan.
-            addendum = crisis_check.crisis_addendum() if crisis_check.is_crisis(text) else ""
-
-            # 3. Pre-stream context, gathered CONCURRENTLY to trim time-to-first-
-            #    token. Intent classification, memory recall, and profile slices are
-            #    independent of one another, so they run together (recall/profile are
-            #    sync vector/file work, pushed to threads). Corpus retrieval is the
-            #    one dependent step — it only runs once intent says this turn
-            #    retrieves — so it follows the gather.
-            intent_task = asyncio.create_task(intent_classifier.classify(text))
-            recall_task = asyncio.create_task(asyncio.to_thread(retrieval.recall_memories, text))
-            profile_task = asyncio.create_task(asyncio.to_thread(profile.slices_for_prompt, text))
-
-            # 3a. Listen-first gate: only a retrieving intent queries the corpus. A
-            #     vent turn never does — the discipline is structural (§5.9), not a
-            #     prompt plea — and is logged either way so the bypass is visible.
-            intent = await intent_task
-            corpus_context, citations = "", []
-            if intent.retrieves:
-                passages = await asyncio.to_thread(retrieval.retrieve_corpus, text)
-                corpus_context = retrieval.format_corpus_context(passages)
-                citations = [p.as_citation() for p in passages]
-                log.info(
-                    "intent=%s (%s) → retrieval fired, %d passage(s) cited",
-                    intent.label, intent.method, len(citations),
-                )
-            else:
-                log.info(
-                    "intent=%s (%s) → retrieval BYPASSED (listen-first)",
-                    intent.label, intent.method,
-                )
-
-            # 3b. (Phase 11) Memory recall — "Eva remembers". Runs on EVERY turn,
-            #     independent of the listen-first gate above: recalling the user's
-            #     OWN past entries is part of listening, not advice (the gate only
-            #     governs the library/corpus). Code does the remembering and the
-            #     relevance gate (recall_memories); the model is only handed the
-            #     relevant summaries. The threshold means an unrelated message
-            #     surfaces nothing, so Eva never fabricates a memory or a chip.
-            #     The current turn was captured above, but its embedding runs in the
-            #     background (slow extraction first), so it cannot recall itself.
-            memories = await recall_task
-            memory_context = retrieval.format_memory_context(memories)
-            if memories:
-                log.info(
-                    "recall fired → %d past entr(y/ies) in context (%s)",
-                    len(memories), ", ".join(m.date for m in memories),
-                )
-
-            # 3c. (Phase 13) Profile slices — what Eva understands about the user.
-            #     Read on EVERY turn through the L3 seam (memory.profile): the core
-            #     (who they are, their goals, their baseline) is always included so
-            #     a reply can reference a stated goal unprompted, and topic-relevant
-            #     patterns/loops are folded in when the message touches them. Returns
-            #     "" when there is no profile (deleted profile.json → no slot, no
-            #     crash). Computed concurrently with intent/recall above (3.).
-            profile_slices = await profile_task
-            if profile_slices:
-                log.info(
-                    "profile → %d slice(s) in context",
-                    profile_slices.count("\n") + 1,
-                )
-
-            # 4. Assemble the system prompt with whatever slots are populated.
-            #    `mode` carries the UI's friend/coach/mentor choice for this turn.
+            # 2. Run the read-loop pipeline (engine.turn): classify →
+            #    assemble_context → check_in prepare all the pre-stream work off one
+            #    TurnState. The engine owns the listen-first gate, the concurrent
+            #    context gather (recent episodes + recall + profile), the crisis-care
+            #    input seam, and the prompt/messages assembly. This socket keeps I/O:
+            #    the emit lock, per-connection history, voice, and the transcript.
             if mode != assembly.DEFAULT_CHAT_MODE:
                 log.info("chat mode = %s", mode)
-            system_prompt = assembly.build_chat_system_prompt(
-                mode=mode,
-                persona_addendum=addendum,
-                memory_context=memory_context,
-                profile_slices=profile_slices,
-                corpus_context=corpus_context,
-            )
-            messages = _compose_messages(system_prompt, history, text)
+            state = engine.TurnState(text=text, mode=mode, history=history)
+            await engine.classify(state)
+            await engine.assemble_context(state)
+            await engine.check_in(state)
 
             await emit({"type": "start"})
-            # 5. Surface citations (if any) before the tokens, so the chips can
-            #    render alongside the bubble. No frame when nothing was retrieved —
-            #    a "not in your library" answer therefore carries no chips at all.
-            if citations:
-                await emit({"type": "citations", "citations": citations})
-            # 5b. (Phase 11) Surface which past days Eva is remembering, so the demo
-            #     audience SEES recall happen as a subtle chip. Only sent when real
-            #     memories cleared the threshold — no memory, no chip, ever.
-            if memories:
+            # 3. Stream intent/persona/debug metadata up front — auditable, and the
+            #    feed for the Phase-21 debug panel. It's classification/retrieval
+            #    derived, so it's ready before the first token.
+            await emit(state.meta_frame())
+            # 3b. (Phase 11) Surface which past days Eva is remembering as a subtle
+            #     chip. Only sent when real memories cleared the threshold — no
+            #     memory, no chip, ever.
+            if state.memories:
                 await emit(
-                    {"type": "memory", "memories": [m.as_chip() for m in memories]}
+                    {"type": "memory", "memories": [m.as_chip() for m in state.memories]}
                 )
 
-            # 6. (Phase 9) When this turn asked for voice, spin up a VoiceStream: it
+            # 4. (Phase 9) When this turn asked for voice, spin up a VoiceStream: it
             #    feeds each token into the §7.5 sentence splitter and synthesizes
             #    completed sentences on a worker, emitting ordered ``audio`` frames
             #    over this socket while the text keeps streaming. Voice is per-turn
-            #    and lazy — no Kokoro load happens unless want_voice is set.
+            #    and lazy — no Kokoro load happens unless want_voice is set. The
+            #    stream loop lives in engine.reason; this socket owns the try/except
+            #    (graceful error frame, voice teardown) around it.
             voice = VoiceStream(tts.synthesize, emit) if want_voice else None
-            reply_parts: list[str] = []
+            stream = llm_client.stream_chat(
+                state.messages, max_tokens=assembly.REPLY_MAX_TOKENS, priority=True
+            )
             try:
-                async for piece in llm_client.stream_chat(
-                    messages, max_tokens=assembly.REPLY_MAX_TOKENS, priority=True
-                ):
-                    reply_parts.append(piece)
-                    await emit({"type": "token", "content": piece})
-                    if voice is not None:
-                        await voice.feed(piece)
-                # Text is complete: tell the UI to drop the streaming cursor now,
-                # before we wait on any still-synthesizing audio.
+                await engine.reason(
+                    state,
+                    stream,
+                    emit=emit,
+                    on_token=(voice.feed if voice is not None else None),
+                )
+                # 5. Output guardrail seam (no invented citations), then surface the
+                #    source chips — validated before they reach the UI. They attach
+                #    to the still-streaming bubble, so they render on the same turn.
+                engine.check_out(state)
+                if state.citations:
+                    await emit({"type": "citations", "citations": state.citations})
+                # Text is complete: drop the streaming cursor before any pending audio.
                 await emit({"type": "done"})
                 if voice is not None:
                     # Drain the splitter's final sentence(s), let the worker finish
@@ -692,8 +619,8 @@ async def chat_ws(ws: WebSocket) -> None:
                 )
                 continue  # don't record a half/failed turn into history
 
-            # 4. Record the completed turn for in-session coherence, bounded.
-            reply_text = "".join(reply_parts)
+            # 6. Record the completed turn for in-session coherence, bounded.
+            reply_text = engine.persist(state)
             history.append({"role": "user", "content": text})
             history.append({"role": "assistant", "content": reply_text})
             if len(history) > _MAX_HISTORY_TURNS:
