@@ -94,6 +94,7 @@ def mem(tmp_path, monkeypatch):
     # Episodes embedding (R4) is also on the done path; default it to a no-op so
     # these tests don't touch Chroma. The dedicated episode test re-patches it.
     monkeypatch.setattr(vector, "embed_episodes", lambda **kw: None)
+    monkeypatch.setattr(vector, "delete_entry_vectors", lambda entry_id: None)
     return capture, db, vault, calls
 
 
@@ -214,8 +215,13 @@ def test_unchanged_extraction_skips_model_and_embed(mem):
     assert len(embed_calls) == 1
 
 
-def test_changed_body_keeps_uid_but_changes_source_hash(mem):
+def test_recompute_entry_updates_l1_fts_mood_and_vectors(mem, monkeypatch):
     capture, db, vault, embed_calls = mem
+    import memory.vector as vector
+
+    episode_calls = []
+    monkeypatch.setattr(vector, "embed_episodes", lambda **kw: episode_calls.append(kw))
+
     rec = capture.capture_entry("Original body.", "journal")
     status = asyncio.run(capture.run_extraction_and_embed(
         rec.id, rec.text, rec.date, call_model=make_caller(GOOD_JSON)
@@ -230,27 +236,81 @@ def test_changed_body_keeps_uid_but_changes_source_hash(mem):
 
     updated = vault.update_entry(rec.id, "Changed body.")
     assert updated is not None and updated.id == rec.id
-    conn = db.connect()
-    try:
-        db.update_entry_text(
-            conn, updated.id, text=updated.text, word_count=updated.word_count
-        )
-    finally:
-        conn.close()
 
-    status = asyncio.run(capture.run_extraction_and_embed(
-        updated.id, updated.text, updated.date, call_model=make_caller(GOOD_JSON)
-    ))
+    status = asyncio.run(
+        capture.recompute_entry(updated.id, call_model=make_caller(GOOD_JSON))
+    )
 
     conn = db.connect()
     try:
+        entry = db.get_entry(conn, rec.id)
         second_hash = db.get_extraction(conn, rec.id)["source_hash"]
+        mood_rows = conn.execute(
+            "SELECT COUNT(*) FROM mood_series WHERE entry_id=?", (rec.id,)
+        ).fetchone()[0]
+        changed_hits = conn.execute(
+            """
+            SELECT e.id
+            FROM entries_fts
+            JOIN entries e ON e.rowid = entries_fts.rowid
+            WHERE entries_fts MATCH ?
+            """,
+            ("Changed",),
+        ).fetchall()
+        old_hits = conn.execute(
+            """
+            SELECT e.id
+            FROM entries_fts
+            JOIN entries e ON e.rowid = entries_fts.rowid
+            WHERE entries_fts MATCH ?
+            """,
+            ("Original",),
+        ).fetchall()
     finally:
         conn.close()
     assert status == "done"
+    assert entry["text"] == "Changed body."
     assert second_hash == vault.source_hash("Changed body.")
     assert second_hash != first_hash
+    assert mood_rows == 1
+    assert [r["id"] for r in changed_hits] == [rec.id]
+    assert old_hits == []
     assert len(embed_calls) == 2
+    assert len(episode_calls) == 2
+    assert episode_calls[-1]["entry_id"] == rec.id
+
+
+def test_recompute_failure_clears_stale_mood_and_vectors(mem, monkeypatch):
+    capture, db, vault, _ = mem
+    import memory.vector as vector
+
+    deleted = []
+    monkeypatch.setattr(vector, "delete_entry_vectors", lambda entry_id: deleted.append(entry_id))
+
+    rec = capture.capture_entry("Original body.", "journal")
+    assert asyncio.run(capture.run_extraction_and_embed(
+        rec.id, rec.text, rec.date, call_model=make_caller(GOOD_JSON)
+    )) == "done"
+    assert vault.update_entry(rec.id, "Changed body that fails.") is not None
+
+    status = asyncio.run(
+        capture.recompute_entry(rec.id, call_model=make_caller("bad", "still bad"))
+    )
+
+    conn = db.connect()
+    try:
+        ext = db.get_extraction(conn, rec.id)
+        mood_rows = conn.execute(
+            "SELECT COUNT(*) FROM mood_series WHERE entry_id=?", (rec.id,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert status == "null_stored"
+    assert ext["extraction_status"] == "null_stored"
+    assert ext["summary"] is None
+    assert mood_rows == 0
+    assert deleted == [rec.id]
 
 
 def test_entry_ids_survive_db_rebuild_from_markdown(mem):

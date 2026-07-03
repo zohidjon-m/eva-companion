@@ -1,4 +1,4 @@
-"""L0 vault — the user's journal as append-only Markdown. The source of truth.
+"""L0 vault — the user's journal as revision-preserving Markdown.
 
 Everything the user writes lands here first, as plain Markdown that is readable
 in any text editor without Eva running. One file per day
@@ -7,9 +7,9 @@ each turn (a chat message or a journal entry) is appended as its own timestamped
 section. Nothing in this module reads or depends on SQLite — the database is
 derived from these files, never the other way round (CLAUDE.md rule 5).
 
-Append-only is a hard rule: we only ever add to a day file, never rewrite or
-reorder it, so a crash or a half-finished write can lose at most the single turn
-in flight, never history.
+New entries append to day files. Edits replace one visible body only after the
+superseded body is preserved in ``journal/.history``, so L0 remains the
+irreplaceable source of truth and original wording is still retrievable.
 """
 
 from __future__ import annotations
@@ -60,6 +60,25 @@ class EntryRecord:
     created_at: str     # ISO-8601 timestamp
 
 
+@dataclass(frozen=True)
+class EntryRevision:
+    """One superseded body for an edited entry.
+
+    Revision files live under ``journal/.history/<uid>/`` and are immutable once
+    written. They preserve what the visible day-file block said before an edit.
+    """
+
+    uid: str
+    revision: int
+    date: str
+    type: str
+    created_at: str
+    superseded_at: str
+    source_hash: str
+    text: str
+    path: Path
+
+
 def journal_dir() -> Path:
     """Return the directory holding the per-day Markdown files."""
     return vault_dir() / "journal"
@@ -68,6 +87,10 @@ def journal_dir() -> Path:
 def day_file(date: str) -> Path:
     """Return the Markdown file path for a given ``YYYY-MM-DD`` date string."""
     return journal_dir() / f"{date}.md"
+
+
+def _history_dir(entry_id: str) -> Path:
+    return journal_dir() / ".history" / entry_id
 
 
 def _frontmatter(date: str, created_at: str) -> str:
@@ -164,16 +187,77 @@ def save_entry(text: str, entry_type: str, *, when: datetime | None = None) -> E
     return rec
 
 
-def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
-    """Rewrite the body of an existing turn in its day file. Returns the updated
-    record, or ``None`` if no turn with that id is found on disk.
+def _next_revision_number(entry_id: str) -> int:
+    existing: list[int] = []
+    for path in _history_dir(entry_id).glob("*.md"):
+        if path.stem.isdigit():
+            existing.append(int(path.stem))
+    return max(existing, default=0) + 1
 
-    This is the single, deliberate exception to the append-only rule (editable
-    past entries). The crash-safety that rule gave us is preserved two ways: the
-    whole day file is copied to ``<file>.bak`` before the rewrite, and the new
-    content is written to a temp file then atomically swapped in. Only the matched
-    turn's body changes — the frontmatter, the day heading, and every other turn
-    in the file are kept byte-for-byte.
+
+def _revision_frontmatter(
+    *,
+    entry_id: str,
+    revision: int,
+    date: str,
+    created_at: str,
+    entry_type: str,
+    superseded_at: str,
+    old_text: str,
+) -> str:
+    data = {
+        "kind": "eva-entry-revision",
+        "uid": entry_id,
+        "revision": revision,
+        "date": date,
+        "created_at": created_at,
+        "type": entry_type,
+        "superseded_at": superseded_at,
+        "source_hash": source_hash(old_text),
+    }
+    header = yaml.safe_dump(data, sort_keys=False, default_flow_style=False).strip()
+    return f"---\n{header}\n---\n\n"
+
+
+def _write_revision(
+    *,
+    entry_id: str,
+    revision: int,
+    date: str,
+    created_at: str,
+    entry_type: str,
+    old_text: str,
+    superseded_at: str,
+) -> Path:
+    directory = _history_dir(entry_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{revision:04d}.md"
+    tmp = directory / f"{revision:04d}.md.tmp"
+    tmp.write_text(
+        _revision_frontmatter(
+            entry_id=entry_id,
+            revision=revision,
+            date=date,
+            created_at=created_at,
+            entry_type=entry_type,
+            superseded_at=superseded_at,
+            old_text=old_text,
+        )
+        + canonical_entry_text(old_text)
+        + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return path
+
+
+def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
+    """Edit one visible L0 entry while preserving the superseded revision.
+
+    The current day-file block is updated through a temp file and atomic replace,
+    but the previous body is first stored under ``journal/.history/<uid>/``. A
+    no-op edit returns the current record without creating a revision or touching
+    the day file. Returns ``None`` when the UID is absent from L0.
     """
     if not new_text or not new_text.strip():
         raise ValueError("refusing to save an empty entry")
@@ -185,27 +269,23 @@ def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
             lines = path.read_text(encoding="utf-8").split("\n")
             out: list[str] = []
             i, n = 0, len(lines)
-            cur_time: str | None = None
-            cur_type: str | None = None
             hit_time: str | None = None
             hit_type: str | None = None
+            old_body: str | None = None
             found = False
 
             while i < n:
                 line = lines[i]
                 parsed_header = _parse_turn_header(line)
-                header = _TURN_HEADER_RE.match(line)
-                if parsed_header:
-                    cur_time, cur_type, header_uid = parsed_header
-                elif header:
-                    cur_time, cur_type, header_uid = header.group(1), header.group(2).strip(), None
                 out.append(line)
                 if parsed_header and parsed_header[2] == entry_id:
                     found = True
                     hit_time, hit_type = parsed_header[0], parsed_header[1]
                     i += 1
+                    start = i
                     while i < n and not _TURN_HEADER_RE.match(lines[i]):
                         i += 1
+                    old_body = "\n".join(lines[start:i]).strip()
                     out.append("")
                     out.extend(body.split("\n"))
                     out.append("")
@@ -213,13 +293,20 @@ def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
                 id_match = _ID_RE.match(line.strip())
                 if id_match and id_match.group(1).strip() == entry_id:
                     found = True
-                    hit_time, hit_type = cur_time, cur_type
+                    hit_time, hit_type = None, None
+                    for prev in reversed(out[:-1]):
+                        parsed_prev = _parse_turn_header(prev)
+                        if parsed_prev:
+                            hit_time, hit_type = parsed_prev[0], parsed_prev[1]
+                            break
                     # Skip the original body up to the next turn header (or EOF),
                     # then write the new body framed by single blank lines so the
                     # section spacing matches what `_turn_block` originally wrote.
                     i += 1
+                    start = i
                     while i < n and not _TURN_HEADER_RE.match(lines[i]):
                         i += 1
+                    old_body = "\n".join(lines[start:i]).strip()
                     out.append("")
                     out.extend(body.split("\n"))
                     out.append("")
@@ -227,11 +314,6 @@ def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
                 i += 1
 
             if found:
-                backup = path.with_suffix(path.suffix + ".bak")
-                shutil.copy2(path, backup)
-                tmp = path.with_suffix(path.suffix + ".tmp")
-                tmp.write_text("\n".join(out), encoding="utf-8")
-                tmp.replace(path)
                 rec = EntryRecord(
                     id=entry_id,
                     date=date,
@@ -240,8 +322,29 @@ def update_entry(entry_id: str, new_text: str) -> EntryRecord | None:
                     word_count=len(body.split()),
                     created_at=f"{date}T{hit_time or '00:00:00'}",
                 )
-                log.info("vault: updated %s turn %s in %s (backup %s)",
-                         rec.type, entry_id, path.name, backup.name)
+                if canonical_entry_text(old_body or "") == body:
+                    log.info("vault: skipped no-op edit for %s turn %s", rec.type, entry_id)
+                    return rec
+                revision = _next_revision_number(entry_id)
+                _write_revision(
+                    entry_id=entry_id,
+                    revision=revision,
+                    date=date,
+                    created_at=rec.created_at,
+                    entry_type=rec.type,
+                    old_text=old_body or "",
+                    superseded_at=datetime.now().isoformat(timespec="seconds"),
+                )
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text("\n".join(out), encoding="utf-8")
+                tmp.replace(path)
+                log.info(
+                    "vault: updated %s turn %s in %s (revision %04d)",
+                    rec.type,
+                    entry_id,
+                    path.name,
+                    revision,
+                )
                 return rec
     return None
 
@@ -445,3 +548,80 @@ def read_day(date: str) -> list[DayTurn]:
         body.append(line)
     flush()
     return turns
+
+
+def find_entry(entry_id: str) -> EntryRecord | None:
+    """Return the current visible L0 entry for ``entry_id``.
+
+    R5 recompute starts from Markdown, not SQLite, so this helper scans day files
+    and returns the current body plus stable metadata needed to refresh derived
+    rows. ``None`` means the UID is not present in L0.
+    """
+    for date in list_day_dates():
+        for turn in read_day(date):
+            if turn.id == entry_id:
+                return EntryRecord(
+                    id=entry_id,
+                    date=date,
+                    type=turn.type,
+                    text=canonical_entry_text(turn.text),
+                    word_count=len(canonical_entry_text(turn.text).split()),
+                    created_at=f"{date}T{turn.time}",
+                )
+    return None
+
+
+def _load_revision(path: Path) -> EntryRevision | None:
+    raw = path.read_text(encoding="utf-8")
+    if not raw.startswith("---\n"):
+        return None
+    end = raw.find("\n---\n", 4)
+    if end == -1:
+        return None
+    meta = yaml.safe_load(raw[4:end]) or {}
+    text = raw[end + len("\n---\n"):].strip()
+    try:
+        revision = int(meta.get("revision", path.stem))
+    except (TypeError, ValueError):
+        return None
+    uid = str(meta.get("uid") or path.parent.name)
+    return EntryRevision(
+        uid=uid,
+        revision=revision,
+        date=str(meta.get("date") or ""),
+        type=str(meta.get("type") or "journal"),
+        created_at=str(meta.get("created_at") or ""),
+        superseded_at=str(meta.get("superseded_at") or ""),
+        source_hash=str(meta.get("source_hash") or source_hash(text)),
+        text=text,
+        path=path,
+    )
+
+
+def list_revisions(entry_id: str) -> list[EntryRevision]:
+    """Return all preserved revisions for ``entry_id``, oldest first.
+
+    The list is derived from ``journal/.history/<uid>/*.md`` and does not depend
+    on SQLite. Malformed non-revision files are ignored so a stray editor file in
+    the history directory cannot break the journal API.
+    """
+    directory = _history_dir(entry_id)
+    if not directory.exists():
+        return []
+    revisions = [
+        revision
+        for path in sorted(directory.glob("*.md"))
+        if (revision := _load_revision(path)) is not None
+    ]
+    return sorted(revisions, key=lambda revision: revision.revision)
+
+
+def original_revision(entry_id: str) -> EntryRevision | None:
+    """Return the first preserved revision for ``entry_id``, if one exists."""
+    revisions = list_revisions(entry_id)
+    return revisions[0] if revisions else None
+
+
+def has_revisions(entry_id: str) -> bool:
+    """Return whether ``entry_id`` has any preserved superseded body."""
+    return original_revision(entry_id) is not None

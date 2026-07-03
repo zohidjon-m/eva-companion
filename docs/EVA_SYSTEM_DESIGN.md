@@ -128,7 +128,7 @@ Fourteen components in five groups. Each lists its responsibility and its key in
 5. **Text-to-speech & sentence queue** — Kokoro (`af_heart`); a splitter that consumes the token stream, emits at sentence boundaries, synthesizes each sentence, and streams ordered audio chunks to the shell. *Interface:* `speak_stream(token_iter) -> async audio-chunk iterator`.
 
 ### Group C — Memory (the five layers + the loop)
-6. **Vault & capture (L0 + L1)** — append-only full Markdown entries (truth) + the bounded per-entry extraction + the SQLite capture schema. **Foundational — build first.** *Interface:* `save_entry(text) -> entry_id`; `get_entry(id)`; `query_episodes(filters)`.
+6. **Vault & capture (L0 + L1)** — full Markdown entries as truth, with append-only new entries and revision-preserving edits, plus the bounded per-entry extraction + the SQLite capture schema. **Foundational — build first.** *Interface:* `save_entry(text) -> entry_id`; `get_entry(id)`; `query_episodes(filters)`.
 7. **Semantic index (L2)** — FastEmbed (`bge-small-en-v1.5`) + ChromaDB; embeds entry summaries and episodic units. *Interface:* `index(summary, meta)`; `recall(query, k) -> hits`.
 8. **User model (L3)** — the evolving profile: claim schema, the operation grammar the model may emit, and the deterministic apply/decay/contradiction logic; structured `profile.json` + user-editable `profile.md`. **Hardest component.** *Interface:* `retrieve_slices(topic) -> profile fragments`; `apply_ops(ops)`.
 9. **Derived analytics (L4)** — mood/emotion time-series, period-vs-period deltas, knowledge-graph builder. Pure computation. *Interface:* `mood_series(range)`; `period_delta(a, b)`; `build_graph()`.
@@ -161,7 +161,7 @@ Design rules that the data layer enforces (from the Memory doc): **every L3 clai
 
 **ChromaDB embedding model versioning:** if the embedding model is ever changed (e.g. `bge-small` → `bge-base`), existing vectors are incompatible. `vector.py` stores the model name in a config record inside the collection metadata. On startup it checks: if the stored model name does not match the current model, it raises a migration error and provides a `scripts/reindex.py` command to re-embed from scratch. Never silently mix vectors from different models.
 
-**Recovery posture:** if SQLite or Chroma is corrupted, rebuild from L0 by re-running extraction and embedding. If `profile.json` is lost, rebuild incrementally from L1 (with the user's `profile.md` edits re-applied as anchors). L0 is the only irreplaceable store, so it is append-only and never rewritten.
+**Recovery posture:** if SQLite or Chroma is corrupted, rebuild from L0 by re-running extraction and embedding. If `profile.json` is lost, rebuild incrementally from L1 (with the user's `profile.md` edits re-applied as anchors). L0 is the only irreplaceable store: new entries append to Markdown, and edits preserve prior bodies in revision history before the visible block is replaced.
 
 **Vault portability:** the vault path is stored in settings as an absolute path. If the user moves the vault folder, they re-point it in Settings → Vault Location. All internal references use relative paths *within* the vault (e.g. `journal/2026-06-10.md`, not `~/EvaVault/journal/...`), so the vault itself is self-consistent regardless of where it lives.
 
@@ -291,7 +291,7 @@ Background jobs (`run_nightly`, `run_weekly`) are scheduler-driven, not user-fac
 | Misquoted religious/factual citation (real harm) | Cite only retrieved corpus passages; never generate citations from memory |
 | Growth analytics read as a harmful verdict | Descriptive framing only; user is the interpreter |
 | Privacy promise broken by a hidden call | Network guard + telemetry off + packet-capture audit in the UI |
-| Irreplaceable data loss | L0 append-only and self-sufficient; L1–L4 rebuildable from it |
+| Irreplaceable data loss | L0 is self-sufficient and revision-preserving; L1–L4 rebuildable from it |
 
 ---
 

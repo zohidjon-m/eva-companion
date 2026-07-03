@@ -75,16 +75,30 @@ export type JournalEntryFull = {
   date: string;
   created_at: string;
   text: string;
+  has_revisions: boolean;
+  original_text: string | null;
 };
 
-async function postJSON<T>(path: string, body: unknown): Promise<T> {
+async function requestJSON<T>(
+  method: "POST" | "PUT",
+  path: string,
+  body: unknown,
+): Promise<T> {
   const resp = await fetch(`${BASE}${path}`, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error(`POST ${path} -> ${resp.status}`);
+  if (!resp.ok) throw new Error(`${method} ${path} -> ${resp.status}`);
   return (await resp.json()) as T;
+}
+
+async function postJSON<T>(path: string, body: unknown): Promise<T> {
+  return requestJSON("POST", path, body);
+}
+
+async function putJSON<T>(path: string, body: unknown): Promise<T> {
+  return requestJSON("PUT", path, body);
 }
 
 /** Save a journal entry. Resolves once it is durably stored server-side. */
@@ -134,11 +148,11 @@ export async function fetchEntries(): Promise<JournalEntry[]> {
 }
 
 /**
- * Save an edit to an existing journal post: rewrites its Markdown on disk and
- * re-derives the index/insights server-side. Resolves to the updated post.
+ * Save an edit to an existing entry: stores a revision and synchronously
+ * re-derives the entry's index/insights server-side. Resolves to the updated post.
  */
 export function updateJournal(id: string, text: string): Promise<JournalEntryFull> {
-  return postJSON(`/journal/entry/${id}`, { text });
+  return putJSON(`/entries/${id}`, { text });
 }
 
 /** Fetch one full journal post by id for the read-only view (404 → null). */

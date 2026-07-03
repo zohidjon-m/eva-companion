@@ -78,6 +78,8 @@ export type UseJournal = {
   /** The full text of the currently-open post (null while loading / not found). */
   entryDetail: JournalEntryFull | null;
   entryLoading: boolean;
+  showingOriginal: boolean;
+  toggleOriginal: () => void;
   layout: JournalLayout;
   setLayout: (layout: JournalLayout) => void;
   save: () => void;
@@ -112,6 +114,7 @@ export function useJournal(): UseJournal {
   const [view, setView] = useState<JournalView>({ kind: "index" });
   const [entryDetail, setEntryDetail] = useState<JournalEntryFull | null>(null);
   const [entryLoading, setEntryLoading] = useState(false);
+  const [showingOriginal, setShowingOriginal] = useState(false);
 
   // Editing an already-saved post. `editing` flips the entry view's reader into
   // an editable editor seeded with the post's current text (in display form).
@@ -175,6 +178,7 @@ export function useJournal(): UseJournal {
   const loadEntry = useCallback(async (id: string) => {
     setEntryLoading(true);
     setEntryDetail(null);
+    setShowingOriginal(false);
     try {
       setEntryDetail(await fetchEntry(id));
     } catch {
@@ -221,6 +225,7 @@ export function useJournal(): UseJournal {
   const openIndex = useCallback(() => {
     setAck({ kind: "idle" });
     setEditing(false);
+    setShowingOriginal(false);
     setView({ kind: "index" });
   }, []);
 
@@ -228,6 +233,7 @@ export function useJournal(): UseJournal {
     setAck({ kind: "idle" });
     setSaveError(null);
     setEditing(false);
+    setShowingOriginal(false);
     setView({ kind: "compose" });
   }, []);
 
@@ -235,6 +241,7 @@ export function useJournal(): UseJournal {
     (id: string) => {
       setAck({ kind: "idle" });
       setEditing(false);
+      setShowingOriginal(false);
       setView({ kind: "entry", id });
       loadEntry(id);
     },
@@ -247,6 +254,7 @@ export function useJournal(): UseJournal {
   const startEdit = useCallback(() => {
     if (!entryDetail) return;
     setEditError(null);
+    setShowingOriginal(false);
     setEditDraft(toDisplayMarkdown(entryDetail.text));
     setEditing(true);
   }, [entryDetail]);
@@ -266,6 +274,7 @@ export function useJournal(): UseJournal {
       // vault-relative in the L0 source of truth.
       const updated = await updateJournal(entryDetail.id, toStorageMarkdown(text));
       setEntryDetail(updated);
+      setShowingOriginal(false);
       setEditing(false);
       await refresh(); // word counts / previews in the index reflect the edit
     } catch {
@@ -274,6 +283,10 @@ export function useJournal(): UseJournal {
       setSavingEdit(false);
     }
   }, [editDraft, entryDetail, savingEdit, refresh]);
+
+  const toggleOriginal = useCallback(() => {
+    setShowingOriginal((value) => !value);
+  }, []);
 
   return {
     today,
@@ -288,6 +301,8 @@ export function useJournal(): UseJournal {
     view,
     entryDetail,
     entryLoading,
+    showingOriginal,
+    toggleOriginal,
     layout,
     setLayout,
     save,

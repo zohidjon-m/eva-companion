@@ -925,56 +925,77 @@ def journal_entry(entry_id: str) -> dict:
     finally:
         conn.close()
     if row is not None and row["type"] == "journal":
-        return {
-            "id": row["id"],
-            "date": row["date"],
-            "created_at": row["created_at"],
-            "text": row["text"],
-        }
+        return _entry_payload(
+            id=row["id"],
+            date=row["date"],
+            created_at=row["created_at"],
+            text=row["text"],
+        )
 
     for date in vault.list_day_dates():
         for turn in vault.read_day(date):
             if turn.type == "journal" and turn.id == entry_id:
-                return {
-                    "id": turn.id,
-                    "date": date,
-                    "created_at": f"{date}T{turn.time}",
-                    "text": turn.text,
-                }
+                return _entry_payload(
+                    id=turn.id,
+                    date=date,
+                    created_at=f"{date}T{turn.time}",
+                    text=turn.text,
+                )
     raise HTTPException(status_code=404, detail="no journal entry with that id")
 
 
-@app.post("/journal/entry/{entry_id}")
-def update_journal_entry(
-    entry_id: str, body: JournalIn, background: BackgroundTasks
-) -> dict:
-    """Edit an existing journal entry: rewrite its L0 Markdown, re-index, re-extract.
+def _entry_payload(*, id: str, date: str, created_at: str, text: str) -> dict:
+    original = vault.original_revision(id)
+    return {
+        "id": id,
+        "date": date,
+        "created_at": created_at,
+        "text": text,
+        "has_revisions": original is not None,
+        "original_text": original.text if original is not None else None,
+    }
 
-    The vault rewrite (the one place append-only is relaxed) keeps a ``.bak`` and
-    is atomic; we then bring the L1 index text/word_count in step and re-run the
-    same background extraction + embed the save path uses, so the entry's mood,
-    themes, and recall vector reflect the new text. 404 if the id isn't found.
-    """
+
+async def _update_entry_and_recompute(entry_id: str, text: str) -> vault.EntryRecord:
     try:
-        rec = vault.update_entry(entry_id, body.text)
+        rec = vault.update_entry(entry_id, text)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if rec is None:
-        raise HTTPException(status_code=404, detail="no journal entry with that id")
+        raise HTTPException(status_code=404, detail="no entry with that id")
 
-    conn = db.get_or_create_db()
     try:
-        db.update_entry_text(conn, rec.id, text=rec.text, word_count=rec.word_count)
-    finally:
-        conn.close()
+        await capture.recompute_entry(rec.id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="no entry with that id") from e
+    return rec
 
-    background.add_task(capture.run_extraction_and_embed, rec.id, rec.text, rec.date)
-    return {
-        "id": rec.id,
-        "date": rec.date,
-        "created_at": rec.created_at,
-        "text": rec.text,
-    }
+
+@app.put("/entries/{uid}")
+async def update_entry(uid: str, body: JournalIn) -> dict:
+    """Edit one entry by stable UID and synchronously recompute derived memory."""
+    rec = await _update_entry_and_recompute(uid, body.text)
+    return _entry_payload(
+        id=rec.id,
+        date=rec.date,
+        created_at=rec.created_at,
+        text=rec.text,
+    )
+
+
+@app.post("/journal/entry/{entry_id}")
+async def update_journal_entry(entry_id: str, body: JournalIn) -> dict:
+    """Compatibility wrapper for journal edits; canonical API is ``PUT /entries``."""
+    current = vault.find_entry(entry_id)
+    if current is None or current.type != "journal":
+        raise HTTPException(status_code=404, detail="no journal entry with that id")
+    rec = await _update_entry_and_recompute(entry_id, body.text)
+    return _entry_payload(
+        id=rec.id,
+        date=rec.date,
+        created_at=rec.created_at,
+        text=rec.text,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -127,6 +127,50 @@ def test_update_entry_keeps_uid_and_changes_body(vault):
     turns = vault.read_day("2026-06-16")
     assert turns[0].id == rec.id
     assert turns[0].text == "after"
+    assert vault.has_revisions(rec.id)
+    assert vault.original_revision(rec.id).text == "before"
+
+
+def test_multiple_edits_create_ordered_revisions(vault):
+    rec = vault.save_entry("first", "journal", when=datetime(2026, 6, 16, 9, 0, 0))
+
+    vault.update_entry(rec.id, "second")
+    vault.update_entry(rec.id, "third")
+
+    revisions = vault.list_revisions(rec.id)
+    assert [r.revision for r in revisions] == [1, 2]
+    assert [r.text for r in revisions] == ["first", "second"]
+    assert vault.find_entry(rec.id).text == "third"
+
+
+def test_noop_edit_does_not_create_revision(vault):
+    rec = vault.save_entry("same", "journal", when=datetime(2026, 6, 16, 9, 0, 0))
+
+    updated = vault.update_entry(rec.id, " same\n")
+
+    assert updated is not None
+    assert updated.text == "same"
+    assert vault.list_revisions(rec.id) == []
+
+
+def test_failed_day_replace_leaves_day_file_intact(vault, monkeypatch):
+    rec = vault.save_entry("before", "journal", when=datetime(2026, 6, 16, 9, 0, 0))
+    path = vault.day_file("2026-06-16")
+    before = path.read_text(encoding="utf-8")
+    original_replace = type(path).replace
+
+    def fail_day_replace(self, target):
+        if self.name == "2026-06-16.md.tmp":
+            raise OSError("simulated replace failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(type(path), "replace", fail_day_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        vault.update_entry(rec.id, "after")
+
+    assert path.read_text(encoding="utf-8") == before
+    assert vault.read_day("2026-06-16")[0].text == "before"
 
 
 def test_source_hash_ignores_surrounding_whitespace(vault):

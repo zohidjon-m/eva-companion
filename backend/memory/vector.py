@@ -253,6 +253,16 @@ def count() -> int:
     return _get_collection().count()
 
 
+def delete_summary(entry_id: str) -> None:
+    """Remove one entry summary from the ``journals`` collection.
+
+    R5 uses this when a recompute no longer has a successful extraction, so the
+    semantic index cannot recall stale summary text for an edited entry.
+    """
+    _get_collection().delete(ids=[entry_id])
+    log.info("deleted summary vector for entry %s", entry_id)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 4 (R4) — episodes collection (open loops + notable events). One doc per
 # episodic unit, on a separate collection with its own recall path, so a unit can
@@ -367,6 +377,18 @@ def recall_episodes(
 def episodes_count() -> int:
     """Return the number of vectors in the episodes collection (diagnostics/tests)."""
     return _get_episodes_collection().count()
+
+
+def delete_episodes(entry_id: str) -> None:
+    """Remove every episodic unit vector for one entry."""
+    _get_episodes_collection().delete(where={"entry_id": entry_id})
+    log.info("deleted episode vectors for entry %s", entry_id)
+
+
+def delete_entry_vectors(entry_id: str) -> None:
+    """Remove all journal and episode vectors derived from one entry."""
+    delete_summary(entry_id)
+    delete_episodes(entry_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

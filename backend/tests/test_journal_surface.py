@@ -46,8 +46,11 @@ def ctx(tmp_path, monkeypatch):
         return GOOD_JSON
 
     embeds: list = []
+    episode_embeds: list = []
     monkeypatch.setattr(extract, "_llama_server_call", fake_extract_call)
     monkeypatch.setattr(vector, "embed_summary", lambda **kw: embeds.append(kw))
+    monkeypatch.setattr(vector, "embed_episodes", lambda **kw: episode_embeds.append(kw))
+    monkeypatch.setattr(vector, "delete_entry_vectors", lambda entry_id: None)
     monkeypatch.setattr(llm_server, "model_present", lambda: True)
 
     async def fake_ack(messages, **kwargs):
@@ -55,7 +58,13 @@ def ctx(tmp_path, monkeypatch):
 
     monkeypatch.setattr(llm_client, "complete_chat", fake_ack)
 
-    return TestClient(app), {"vault": vault_mod, "db": db_mod, "llm_server": llm_server}
+    return TestClient(app), {
+        "vault": vault_mod,
+        "db": db_mod,
+        "llm_server": llm_server,
+        "embeds": embeds,
+        "episode_embeds": episode_embeds,
+    }
 
 
 def test_save_writes_vault_index_and_extraction(ctx):
@@ -165,3 +174,72 @@ def test_chat_turns_excluded_from_journal_browse(ctx):
     dates = [d["date"] for d in tc.get("/journal/days").json()["days"]]
     assert "2026-04-02" not in dates
     assert tc.get("/journal/day/2026-04-02").status_code == 404
+
+
+def test_put_entry_revisions_and_recomputes_before_return(ctx):
+    tc, mods = ctx
+    saved = tc.post("/journal", json={"text": "Original searchable body."}).json()
+
+    resp = tc.put(f"/entries/{saved['id']}", json={"text": "Changed searchable body."})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == saved["id"]
+    assert body["text"] == "Changed searchable body."
+    assert body["has_revisions"] is True
+    assert body["original_text"] == "Original searchable body."
+
+    conn = mods["db"].connect()
+    try:
+        entry = mods["db"].get_entry(conn, saved["id"])
+        ext = mods["db"].get_extraction(conn, saved["id"])
+        mood_rows = conn.execute(
+            "SELECT COUNT(*) FROM mood_series WHERE entry_id=?", (saved["id"],)
+        ).fetchone()[0]
+        hits = conn.execute(
+            """
+            SELECT e.id
+            FROM entries_fts
+            JOIN entries e ON e.rowid = entries_fts.rowid
+            WHERE entries_fts MATCH ?
+            """,
+            ("Changed",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert entry["text"] == "Changed searchable body."
+    assert ext["extraction_status"] == "done"
+    assert ext["source_hash"] == mods["vault"].source_hash("Changed searchable body.")
+    assert mood_rows == 1
+    assert [r["id"] for r in hits] == [saved["id"]]
+    assert len(mods["embeds"]) == 2
+    assert len(mods["episode_embeds"]) == 2
+
+
+def test_journal_edit_route_remains_compatibility_wrapper(ctx):
+    tc, _ = ctx
+    saved = tc.post("/journal", json={"text": "Compatibility original."}).json()
+
+    resp = tc.post(
+        f"/journal/entry/{saved['id']}",
+        json={"text": "Compatibility changed."},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == saved["id"]
+    assert body["text"] == "Compatibility changed."
+    assert body["original_text"] == "Compatibility original."
+
+
+def test_get_journal_entry_exposes_original_after_edit(ctx):
+    tc, _ = ctx
+    saved = tc.post("/journal", json={"text": "Visible original."}).json()
+    tc.put(f"/entries/{saved['id']}", json={"text": "Visible changed."})
+
+    body = tc.get(f"/journal/entry/{saved['id']}").json()
+
+    assert body["text"] == "Visible changed."
+    assert body["has_revisions"] is True
+    assert body["original_text"] == "Visible original."

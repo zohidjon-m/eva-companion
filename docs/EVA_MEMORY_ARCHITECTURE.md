@@ -22,7 +22,7 @@ If we hold that line, all nine features are achievable on E2B. Every time someth
 Memory is organized as five layers, from raw truth at the bottom to computed views at the top. Lower layers are the source of truth; higher layers are *derived* and can always be rebuilt from below.
 
 ### L0 — Raw vault (the truth)
-The complete, unedited daily journal entries, in plain Markdown, plus any attached photos. Append-only. **Never rewritten, never summarized in place, never dependent on a database to be readable.** This is the stable storage contract: a future tool, a backup script, even `grep`, can read it. If every database below is deleted, L0 still holds the user's whole life in plain text. L0 alone delivers literal recall (feature 8) and the "look how naive I was" moment (just show the old entry).
+The complete journal entries, in plain Markdown, plus any attached photos. New entries append to day files; edits are revision-preserving, with superseded bodies stored under `journal/.history/`. **Never summarized in place, never dependent on a database to be readable, and never loses the original text of an edited entry.** This is the stable storage contract: a future tool, a backup script, even `grep`, can read it. If every database below is deleted, L0 still holds the user's whole life in plain text. L0 alone delivers literal recall (feature 8) and the "look how naive I was" moment (show either the current entry or its preserved original).
 
 ### L1 — Episode records (the atoms)
 For every entry, one bounded extraction call turns the prose into a tight structured record, stored in SQLite. This is the only place the model touches raw life, and it's a small job done well. Fields (keep the schema tight — a small model degrades as the schema grows):

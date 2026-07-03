@@ -118,3 +118,115 @@ async def run_extraction_and_embed(
             log.error("embedding failed for entry %s (entry still saved): %s", entry_id, e)
 
     return result.status
+
+
+async def recompute_entry(
+    entry_id: str,
+    *,
+    call_model: ModelCaller | None = None,
+) -> str:
+    """Synchronously rederive L1/L2 for exactly one L0 entry UID.
+
+    R5 edits must become visible before the API returns, but they must not run a
+    full rebuild. This function reads the current Markdown body, refreshes the
+    single SQLite/FTS row, hash-gates extraction, replaces the single mood point,
+    and updates or clears only this entry's journal/episode vectors.
+
+    Raises:
+        KeyError: if ``entry_id`` is not present in the Markdown vault.
+    """
+    rec = vault.find_entry(entry_id)
+    if rec is None:
+        raise KeyError(entry_id)
+
+    source_hash = vault.source_hash(rec.text)
+    conn = db.get_or_create_db()
+    try:
+        previous = db.get_entry(conn, entry_id)
+        db.upsert_entry_from_l0(
+            conn,
+            id=rec.id,
+            date=rec.date,
+            type=rec.type,
+            text=rec.text,
+            word_count=rec.word_count,
+            created_at=rec.created_at,
+            is_seeded=False,
+        )
+        db.refresh_entry_fts(
+            conn,
+            entry_id,
+            previous_text=previous["text"] if previous is not None else None,
+        )
+        current_status = db.current_extraction_status(conn, entry_id, source_hash)
+        if current_status is not None:
+            log.info("skipped recompute for unchanged entry %s", entry_id)
+            return current_status
+        db.mark_extraction_pending(conn, entry_id, source_hash=source_hash)
+    finally:
+        conn.close()
+
+    result = await extract.extract_entry(rec.text, call_model=call_model)
+
+    conn = db.get_or_create_db()
+    try:
+        if result.status == "done":
+            db.finalize_extraction(
+                conn,
+                entry_id,
+                mood=result.mood,
+                emotions=result.emotions,
+                entities=result.entities,
+                themes=result.themes,
+                events=result.events,
+                stated_goals=result.stated_goals,
+                behaviors=result.behaviors,
+                decisions=result.decisions,
+                open_loops=result.open_loops,
+                self_judgments=result.self_judgments,
+                summary=result.summary,
+                extracted_at=result.extracted_at,
+                source_hash=source_hash,
+            )
+            db.replace_mood_series(
+                conn,
+                entry_id=entry_id,
+                date=rec.date,
+                mood=result.mood,
+                emotions=result.emotions,
+                is_seeded=False,
+            )
+        else:
+            db.mark_null_stored(conn, entry_id, source_hash=source_hash)
+            db.delete_mood_series(conn, entry_id)
+    finally:
+        conn.close()
+
+    try:
+        from . import vector
+
+        if result.status == "done":
+            vector.embed_summary(
+                entry_id=entry_id,
+                date=rec.date,
+                summary=result.summary,
+                mood=result.mood,
+                themes=result.themes,
+                is_seeded=False,
+            )
+            vector.embed_episodes(
+                entry_id=entry_id,
+                date=rec.date,
+                mood=result.mood,
+                themes=result.themes,
+                open_loops=result.open_loops,
+                events=result.events,
+                is_seeded=False,
+            )
+        else:
+            vector.delete_entry_vectors(entry_id)
+    except Exception as e:  # noqa: BLE001 - L0/L1 are already durable
+        log.error("vector refresh failed for entry %s (L1 still recomputed): %s", entry_id, e)
+
+    log.info("recomputed entry %s with status %s", entry_id, result.status)
+    return result.status

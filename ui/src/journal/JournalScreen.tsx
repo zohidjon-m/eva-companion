@@ -240,6 +240,8 @@ function EntryView({ journal: j }: { journal: UseJournal }) {
   const d = j.entryDetail;
   const editRef = useRef<JournalEditorHandle>(null);
   const [imgError, setImgError] = useState<string | null>(null);
+  const displayedText =
+    d && j.showingOriginal && d.original_text ? d.original_text : d?.text ?? "";
 
   // When edit mode opens, drop the cursor into the editor ready to type.
   useEffect(() => {
@@ -275,6 +277,11 @@ function EntryView({ journal: j }: { journal: UseJournal }) {
                 ? `${formatDate(d.date, j.today)} · ${timeFromCreated(d.created_at)}`
                 : "Entry"}
             </h2>
+            {d && !j.editing && d.has_revisions && (
+              <button className="btn btn--ghost btn--sm" onClick={j.toggleOriginal}>
+                {j.showingOriginal ? "Current" : "Original"}
+              </button>
+            )}
             {/* Edit affordance — only on a loaded post, hidden while editing. */}
             {d && !j.editing && (
               <button
@@ -303,7 +310,7 @@ function EntryView({ journal: j }: { journal: UseJournal }) {
               {j.editError && <p className="journal__error">{j.editError}</p>}
             </>
           ) : (
-            <JournalEditor editable={false} value={toDisplayMarkdown(d.text)} />
+            <JournalEditor editable={false} value={toDisplayMarkdown(displayedText)} />
           )}
 
           {!j.editing && <Acknowledgment ack={j.ack} />}

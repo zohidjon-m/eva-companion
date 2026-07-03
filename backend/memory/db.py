@@ -166,6 +166,8 @@ def insert_entry(
         """,
         (id, date, type, text, word_count, 1 if is_seeded else 0, created_at),
     )
+    rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (id,)).fetchone()[0]
+    conn.execute("INSERT INTO entries_fts(rowid, text) VALUES (?, ?)", (rowid, text))
     conn.commit()
 
 
@@ -259,6 +261,45 @@ def rebuild_entries_fts(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def refresh_entry_fts(
+    conn: sqlite3.Connection, entry_id: str, *, previous_text: str | None = None
+) -> bool:
+    """Refresh the FTS row for one entry after an L0 edit.
+
+    R5 recomputes exactly one UID, so a full ``entries_fts`` rebuild would hide
+    mistakes and waste work. ``previous_text`` is passed when the row already had
+    indexed terms; FTS5 needs that old body to remove stale tokens from the
+    external-content index before inserting the current text.
+    """
+    row = conn.execute(
+        "SELECT rowid, text FROM entries WHERE id = ?", (entry_id,)
+    ).fetchone()
+    if row is None:
+        return False
+
+    if previous_text is not None:
+        try:
+            conn.execute("SAVEPOINT fts_refresh")
+            conn.execute(
+                "INSERT INTO entries_fts(entries_fts, rowid, text) VALUES ('delete', ?, ?)",
+                (row["rowid"], previous_text),
+            )
+            conn.execute("RELEASE fts_refresh")
+        except sqlite3.DatabaseError:
+            # Some older rows were never inserted into FTS. FTS5 reports that as
+            # "database disk image is malformed" for the delete command; rolling
+            # back the savepoint leaves the index intact, then the insert below
+            # starts indexing the row from now on.
+            conn.execute("ROLLBACK TO fts_refresh")
+            conn.execute("RELEASE fts_refresh")
+    conn.execute(
+        "INSERT INTO entries_fts(rowid, text) VALUES (?, ?)",
+        (row["rowid"], row["text"]),
+    )
+    conn.commit()
+    return True
+
+
 def update_entry_text(
     conn: sqlite3.Connection, entry_id: str, *, text: str, word_count: int
 ) -> None:
@@ -268,10 +309,13 @@ def update_entry_text(
     rewritten. A no-op (zero rows) if the id isn't indexed (e.g. a hand-placed
     entry), which is harmless — the Markdown is still the truth.
     """
+    previous = get_entry(conn, entry_id)
     conn.execute(
         "UPDATE entries SET text = ?, word_count = ? WHERE id = ?",
         (text, word_count, entry_id),
     )
+    if previous is not None:
+        refresh_entry_fts(conn, entry_id, previous_text=previous["text"])
     conn.commit()
 
 
@@ -382,6 +426,43 @@ def ensure_pending_extraction(
         return False
     create_pending_extraction(conn, entry_id, source_hash=source_hash)
     return True
+
+
+def mark_extraction_pending(
+    conn: sqlite3.Connection, entry_id: str, *, source_hash: str | None = None
+) -> None:
+    """Set one extraction row to ``pending`` for a synchronous recompute.
+
+    If the row does not exist (for example a hand-placed Markdown entry being
+    edited before an R3 rebuild), it is created. Existing structured fields are
+    cleared so a crash during recompute cannot leave stale derived facts looking
+    current for the new ``source_hash``.
+    """
+    if get_extraction(conn, entry_id) is None:
+        create_pending_extraction(conn, entry_id, source_hash=source_hash)
+        return
+    conn.execute(
+        """
+        UPDATE extractions
+        SET extraction_status='pending',
+            source_hash=?,
+            mood=NULL,
+            emotions=NULL,
+            entities=NULL,
+            themes=NULL,
+            events=NULL,
+            stated_goals=NULL,
+            behaviors=NULL,
+            decisions=NULL,
+            open_loops=NULL,
+            self_judgments=NULL,
+            summary=NULL,
+            extracted_at=NULL
+        WHERE entry_id=?
+        """,
+        (source_hash, entry_id),
+    )
+    conn.commit()
 
 
 def finalize_extraction(
