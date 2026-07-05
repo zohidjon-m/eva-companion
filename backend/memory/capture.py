@@ -228,5 +228,41 @@ async def recompute_entry(
     except Exception as e:  # noqa: BLE001 - L0/L1 are already durable
         log.error("vector refresh failed for entry %s (L1 still recomputed): %s", entry_id, e)
 
+    # The entry's body changed (we passed the hash gate above), so its extraction
+    # was rewritten — whether that succeeded (`done`) or degraded to `null_stored`,
+    # any L3 claim resting on this entry may no longer hold. Flag them either way.
+    _flag_claims_for_revalidation(entry_id)
+
     log.info("recomputed entry %s with status %s", entry_id, result.status)
     return result.status
+
+
+def _flag_claims_for_revalidation(entry_id: str) -> None:
+    """Flag L3 claims citing ``entry_id`` for re-audit after that entry was edited.
+
+    When an entry is edited its extraction changes, so any profile claim resting on
+    it may no longer be supported. We don't re-judge here — the claim is revalidated
+    on the next consolidation (R8). We only set ``needs_revalidation`` on the
+    affected claims (IMPLEMENTATION_PLAN_V2 Phase 7.5 self-heal hook / ADR-001 item
+    4) so that audit knows where to look. Best-effort: L0/L1 are already durable, and
+    a missing or unreadable profile must never break the recompute path.
+    """
+    try:
+        from . import profile as profile_mod
+
+        prof = profile_mod.get_profile()
+        if prof is None:
+            return
+        flagged = 0
+        for claims in (prof.goals, prof.patterns, prof.open_loops,
+                       prof.relationships, prof.watch_list):
+            for claim in claims:
+                evidence = claim.get("evidence")
+                if isinstance(evidence, list) and entry_id in evidence:
+                    claim["needs_revalidation"] = True
+                    flagged += 1
+        if flagged:
+            profile_mod.save_profile(prof)
+            log.info("flagged %d L3 claim(s) for revalidation after editing %s", flagged, entry_id)
+    except Exception as e:  # noqa: BLE001 — self-heal flagging is best-effort
+        log.error("revalidation flagging failed for entry %s (recompute still done): %s", entry_id, e)

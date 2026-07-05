@@ -362,6 +362,57 @@ Checks:
 - A user-edited anchor cannot be weakened by the model.
 - Rebuild recreates profile from L1 plus anchors.
 
+### R7.5 - Evidence-Backed Identity And Emotional Baseline
+
+Goal: make the L3 `identity` and `emotional_baseline` sections real, closing the
+last demo seam R7 left in place.
+
+Context: R7 shipped the evidence-backed operation engine for goals, patterns,
+open loops, relationship notes, and the watch list. It deliberately did not
+author `identity` or `emotional_baseline`: the §7.3 grammar has no verb that
+creates them, and (unlike goals/patterns) they are singleton dicts with no
+confidence/evidence-claim shape. So the rebuild currently *preserves* those two
+sections from the prior profile rather than deriving them from L1 — the demo/seed
+values survive untouched. This is a scope/design decision, not a bug, and needs
+its own phase.
+
+Scope:
+
+- Decide the claim shape for identity and baseline: either promote them to
+  evidence-carrying claims (e.g. `stated_self`/`principles` and
+  `typical_mood`/`known_triggers`/`what_helps` each gain `evidence` +
+  `confidence` + `source`), or keep the §7.2 dict shape but require an evidence
+  pointer set per field. Update §7.2 and bump `SCHEMA_VERSION` with a migration.
+- Add operation verbs for them (e.g. `set_identity`, `add_principle`,
+  `update_baseline`) under the same evidence gate — no field may be written
+  without a valid entry uid.
+- Derive `typical_mood` deterministically from L1 mood history (code counts, model
+  never does the arithmetic); reserve the model for narrating `stated_self` /
+  `principles` over evidence-counted candidates.
+- Extend `scripts/rebuild_profile.py` to rebuild identity/baseline from L1 while
+  still preserving user anchors on those fields.
+- Extend the self-heal flag and `render_markdown`/`parse_markdown` round-trip to
+  cover the new fields.
+
+Likely files:
+
+- `backend/memory/operations.py`
+- `backend/memory/profile.py`
+- `backend/memory/rebuild_profile.py`
+- `backend/memory/schema.sql` / migration
+- `backend/prompts/profile_operation.md`
+- `docs/EVA_MEMORY_ARCHITECTURE.md` (§7.2/§7.3)
+- `backend/tests/test_profile_operations.py`
+
+Checks:
+
+- Identity and baseline in a rebuilt profile carry evidence pointers into L1, not
+  seed values.
+- `typical_mood` matches a hand-computed average over the mood series.
+- A user-corrected identity/baseline field is anchored and cannot be overwritten
+  by the model.
+- No identity/baseline field is written without valid evidence.
+
 ### R8 - V2 Phase 14: Consolidation Scheduler And Rollups
 
 Goal: build the write loop that updates L3/L4 without blocking chat.

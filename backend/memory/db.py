@@ -834,9 +834,13 @@ def seeded_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Like :func:`seeded_extractions` but for the user's REAL entries (is_seeded=0).
 
-    The input to the live graph build (:func:`memory.graph.store_graph`): each row
-    carries the entry id/date/text plus the extraction's themes/emotions/entities,
-    so the real graph is derived from the same data the mood chart shows.
+    The input to the live graph build (:func:`memory.graph.store_graph`) and the R7
+    L3 rebuild (:func:`memory.rebuild_profile`): each row carries the entry
+    id/date/text plus the extraction's themes/emotions/entities, so both are derived
+    from the same data the mood chart shows. Ordered by ``date`` then ``created_at``
+    then ``rowid`` so same-day entries replay in a **stable** order — the L3 rebuild
+    carries the profile forward across batches, so an unstable order would make the
+    rebuilt profile non-deterministic.
     """
     return conn.execute(
         """
@@ -851,7 +855,7 @@ def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         FROM entries e
         JOIN extractions x ON x.entry_id = e.id
         WHERE e.is_seeded = 0 AND x.extraction_status = 'done'
-        ORDER BY e.date ASC
+        ORDER BY e.date ASC, e.created_at ASC, e.rowid ASC
         """
     ).fetchall()
 
