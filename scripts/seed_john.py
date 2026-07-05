@@ -45,7 +45,7 @@ from pathlib import Path
 # Run from anywhere: make the backend package importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from memory import db, graph, profile, vault, vault_dir  # noqa: E402
+from memory import db, graph, operations, profile, vault, vault_dir  # noqa: E402
 
 log = logging.getLogger("eva.seed_john")
 
@@ -185,11 +185,20 @@ def build_john_profile(by_theme: dict[str, list[str]]) -> dict:
         return seen[:limit]
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "identity": {
             "stated_self": "someone trying to live more deliberately and less online",
             "principles": ["presence", "discipline", "connection"],
-            "provenance": ev("screen time", "reflection"),
+            "provenance": {
+                "stated_self": {
+                    "evidence": ev("screen time", "reflection"),
+                    "source": "model", "last_seen": _iso_days_ago(3),
+                },
+                "principles": {
+                    "evidence": ev("reflection", "connection"),
+                    "source": "model", "last_seen": _iso_days_ago(3),
+                },
+            },
         },
         "goals": [
             {
@@ -256,10 +265,21 @@ def build_john_profile(by_theme: dict[str, list[str]]) -> dict:
             },
         ],
         "emotional_baseline": {
-            "typical_mood": 2,
+            # typical_mood is intentionally omitted here — it is code-derived from the
+            # written entries' moods (operations.apply_typical_mood in main()), never
+            # hand-authored, so the demo profile honours the R7.5 invariant.
             "known_triggers": ["late-night scrolling", "work stress", "boredom", "loneliness"],
             "what_helps": ["a walk or a run", "cooking", "calling a friend", "reading", "sleep"],
-            "evidence": ev("walking", "running", "sleep"),
+            "provenance": {
+                "known_triggers": {
+                    "evidence": ev("screen time", "work"),
+                    "source": "model", "last_seen": _iso_days_ago(4),
+                },
+                "what_helps": {
+                    "evidence": ev("walking", "running", "sleep"),
+                    "source": "model", "last_seen": _iso_days_ago(2),
+                },
+            },
         },
         "open_loops": [
             {
@@ -458,10 +478,20 @@ def main() -> int:
         count, min(moods), max(moods), len(JOHN_DAYS) - len(moods),
     )
 
-    saved = profile.save_profile(profile.Profile.from_dict(build_john_profile(by_theme)))
+    # typical_mood is derived deterministically from the just-written extraction
+    # moods (the R7.5 code-owned source), not hand-authored — the same path a rebuild
+    # uses — so the demo profile is a valid R7.5 profile from the moment it's saved.
+    prof = profile.Profile.from_dict(build_john_profile(by_theme))
+    conn = db.get_or_create_db()
+    try:
+        prof = operations.apply_typical_mood(prof, db.mood_history(conn))
+    finally:
+        conn.close()
+    saved = profile.save_profile(prof)
     log.info(
-        "wrote John's profile: %d goal(s), %d pattern(s), %d relationship(s)",
+        "wrote John's profile: %d goal(s), %d pattern(s), %d relationship(s), typical_mood %s",
         len(saved.goals), len(saved.patterns), len(saved.relationships),
+        saved.emotional_baseline.get("typical_mood"),
     )
 
     # Derive the Connections graph from the same extractions (is_seeded=0).

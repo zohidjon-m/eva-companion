@@ -257,9 +257,27 @@ def _flag_claims_for_revalidation(entry_id: str) -> None:
         for claims in (prof.goals, prof.patterns, prof.open_loops,
                        prof.relationships, prof.watch_list):
             for claim in claims:
-                evidence = claim.get("evidence")
-                if isinstance(evidence, list) and entry_id in evidence:
+                # A claim rests on both its supporting `evidence` and any
+                # `counter_evidence` a weaken cited — editing either entry can change
+                # whether the claim still holds, so re-audit on a change to either.
+                cited = []
+                for key in ("evidence", "counter_evidence"):
+                    value = claim.get(key)
+                    if isinstance(value, list):
+                        cited.extend(value)
+                if entry_id in cited:
                     claim["needs_revalidation"] = True
+                    flagged += 1
+        # R7.5: identity/baseline fields carry evidence in a field-keyed provenance
+        # dict rather than on a claim object — scan those too.
+        for section in (prof.identity, prof.emotional_baseline):
+            prov = section.get("provenance") if isinstance(section, dict) else None
+            if not isinstance(prov, dict):
+                continue
+            for pentry in prov.values():
+                evidence = pentry.get("evidence") if isinstance(pentry, dict) else None
+                if isinstance(evidence, list) and entry_id in evidence:
+                    pentry["needs_revalidation"] = True
                     flagged += 1
         if flagged:
             profile_mod.save_profile(prof)

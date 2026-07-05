@@ -57,8 +57,23 @@ invent an id, and never assert a claim you cannot ground in a specific entry.
   relationship already in the profile.
   Fields: `{"op":"add_relationship_note","name": string,"note": string,"evidence":[entry_id,...]}`
 
-Do not emit any other operation. You cannot edit identity, the emotional baseline,
-or anything the user has personally corrected — leave those alone.
+- `set_identity` — the entries show how the user fundamentally sees themselves, and
+  it differs from the current `identity.stated_self`. Give the corrected phrasing in
+  `text`. Use sparingly — this is who they are, not a passing mood.
+  Fields: `{"op":"set_identity","text": string,"evidence":[entry_id,...]}`
+
+- `add_principle` — the user states a value/principle they live by that is not
+  already in `identity.principles`.
+  Fields: `{"op":"add_principle","text": string,"evidence":[entry_id,...]}`
+
+- `add_baseline_item` — a new emotional trigger or coping aid, not already listed.
+  `field` is `known_triggers` (what tends to set them off) or `what_helps` (what
+  reliably steadies them).
+  Fields: `{"op":"add_baseline_item","field": string,"text": string,"evidence":[entry_id,...]}`
+
+Do not emit any other operation. In particular, NEVER emit or reason about
+`typical_mood` — it is computed from mood history by code, not by you. Leave anything
+the user has personally corrected (an anchored field) alone.
 
 # Current profile
 

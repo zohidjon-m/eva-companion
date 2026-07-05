@@ -19,6 +19,8 @@ def _print_report(report: rebuild_profile.RebuildReport) -> None:
     print(f"patterns           : {report.patterns}")
     print(f"open loops         : {report.open_loops}")
     print(f"watch list         : {report.watch_list}")
+    print(f"identity fields    : {report.identity_fields}")
+    print(f"baseline fields    : {report.baseline_fields}")
     print(f"operations rejected: {report.rejected}")
 
 

@@ -47,7 +47,25 @@ log = logging.getLogger("eva.memory.profile")
 
 # The schema version this module reads/writes. Bumping §7.2 means bumping this
 # and writing a migration (same discipline as the SQLite schema, §7.1).
-SCHEMA_VERSION = 1
+#
+# v1 → v2 (R7.5): identity and emotional_baseline gain a field-keyed ``provenance``
+# dict (per-field ``evidence`` + ``source`` [+ ``last_seen``]), so every inferred
+# field carries its own evidence — see EVA_MEMORY_ARCHITECTURE §7.2. The upgrade is
+# lenient and happens on read (:meth:`Profile.from_dict`): a v1 profile's flat
+# provenance list is dropped to an empty dict (the rebuild re-derives it), and the
+# version is stamped forward, so old files never crash and self-heal on next save.
+SCHEMA_VERSION = 2
+
+# The identity/baseline fields the model may author (each gets a provenance entry)
+# and the synthetic anchor-path sections they live under. ``typical_mood`` is
+# code-owned (no verb writes it) but is still anchorable so a user correction to it
+# survives a rebuild.
+_IDENTITY_FIELDS = ("stated_self", "principles")
+_BASELINE_FIELDS = ("typical_mood", "known_triggers", "what_helps")
+
+# The valid range for typical_mood (§7.2 — the −5…+5 scale render_markdown shows).
+# A hand-edit outside this is a typo, not a real correction, and is rejected.
+MOOD_MIN, MOOD_MAX = -5, 5
 
 # Writes regenerate both files; serialize them so two concurrent PUT /profile
 # saves can't interleave a read and a write (FastAPI may use threads).
@@ -114,13 +132,21 @@ class Profile:
         anchors_raw = data.get("anchors")
         anchors = [str(a) for a in anchors_raw] if isinstance(anchors_raw, list) else []
         version = data.get("schema_version")
+        # v1 → v2 migration (upgrade-on-read): ensure identity/baseline carry a
+        # field-keyed provenance dict, and stamp the version forward. A stored
+        # version at or above the current one is preserved (never downgraded).
+        identity = _dict("identity")
+        baseline = _dict("emotional_baseline")
+        _ensure_provenance(identity)
+        _ensure_provenance(baseline)
+        upgraded = version if isinstance(version, int) and version >= SCHEMA_VERSION else SCHEMA_VERSION
         return cls(
-            schema_version=version if isinstance(version, int) else SCHEMA_VERSION,
-            identity=_dict("identity"),
+            schema_version=upgraded,
+            identity=identity,
             goals=_list("goals"),
             patterns=_list("patterns"),
             relationships=_list("relationships"),
-            emotional_baseline=_dict("emotional_baseline"),
+            emotional_baseline=baseline,
             open_loops=_list("open_loops"),
             watch_list=_list("watch_list"),
             anchors=anchors,
@@ -139,6 +165,53 @@ class Profile:
             "watch_list": self.watch_list,
             "anchors": self.anchors,
         }
+
+
+def _ensure_provenance(section: dict) -> None:
+    """Ensure ``section["provenance"]`` is a field-keyed dict (§7.2 v2 shape).
+
+    The v1 shape stored provenance as a flat list of entry uids (or, on the
+    baseline, a top-level ``evidence`` list); v2 keys evidence by field name inside
+    ``provenance``. A non-dict (old list) or missing value becomes an empty dict —
+    the rebuild re-derives per-field evidence from L1 — and the stale v1
+    ``evidence`` key is dropped, so reading a v1 profile never crashes and migrates
+    in place on the next save.
+    """
+    if not isinstance(section.get("provenance"), dict):
+        section["provenance"] = {}
+        section.pop("evidence", None)  # v1 baseline stored a flat evidence list here
+
+
+def field_anchor_path(section: str, field: str) -> str:
+    """The synthetic anchor path for a singleton field, e.g. ``identity.stated_self``.
+
+    Identity/baseline fields carry no claim ``id``, so anchoring keys off these
+    stable path strings in :attr:`Profile.anchors` (R7.5). ``section`` is
+    ``"identity"`` or ``"baseline"``.
+    """
+    return f"{section}.{field}"
+
+
+def is_field_anchored(profile: Profile, path: str) -> bool:
+    """Whether a singleton identity/baseline field is user-anchored (R7.5).
+
+    True when the synthetic ``path`` (``identity.stated_self`` etc.) is in
+    :attr:`Profile.anchors`, or the field's provenance entry carries
+    ``source == "user"``. The evidence gate in :mod:`memory.operations` and the
+    rebuild both call this so the model can never overwrite a user correction to
+    identity or the emotional baseline.
+    """
+    if path in profile.anchors:
+        return True
+    section, _, field = path.partition(".")
+    holder = (
+        profile.identity if section == "identity"
+        else profile.emotional_baseline if section == "baseline"
+        else {}
+    )
+    prov = holder.get("provenance") if isinstance(holder, dict) else None
+    entry = prov.get(field) if isinstance(prov, dict) else None
+    return isinstance(entry, dict) and entry.get("source") == "user"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,8 +493,10 @@ def render_markdown(profile: Profile) -> str:
 #   * **Edits become anchors.** A claim whose text the user changed is marked
 #     ``source="user"`` and its id is added to ``anchors`` — the model's update
 #     engine may not later weaken/strengthen/overwrite it (§7.2, §7.3 set_anchor).
-#     Claims that carry no id of their own (identity, baseline, relationships)
-#     still take the user's edit; only id-bearing claims register in ``anchors``.
+#     Identity and baseline fields carry no id, so a corrected field registers a
+#     synthetic path anchor instead (``identity.stated_self``, ``baseline.known_triggers``,
+#     …) and its provenance ``source`` becomes ``user`` (R7.5). Relationships still
+#     take the user's edit without an anchor (they carry neither id nor path).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # A "## Heading" line.
@@ -485,12 +560,38 @@ def parse_markdown(md: str, base: Profile) -> tuple[Profile, list[str]]:
     watch_list = [dict(w) for w in base.watch_list]
     anchors = list(base.anchors)
 
+    # Deep-copy the provenance dicts so anchoring a field edit here can't mutate the
+    # base profile's provenance in place (§7.2 v2 field-keyed provenance).
+    identity["provenance"] = {
+        k: dict(v) if isinstance(v, dict) else v
+        for k, v in (identity.get("provenance") or {}).items()
+    }
+    baseline["provenance"] = {
+        k: dict(v) if isinstance(v, dict) else v
+        for k, v in (baseline.get("provenance") or {}).items()
+    }
+
     def _anchor(claim: dict) -> None:
         """Mark an id-bearing claim as a user correction (§7.2 set_anchor)."""
         claim["source"] = "user"
         cid = claim.get("id")
         if cid and cid not in anchors:
             anchors.append(cid)
+
+    def _anchor_field(section_dict: dict, section: str, field: str) -> None:
+        """Mark a singleton identity/baseline field as a user correction (R7.5).
+
+        Registers the synthetic anchor path and stamps the field's provenance
+        ``source = "user"`` so the model's update engine leaves it alone thereafter.
+        """
+        path = field_anchor_path(section, field)
+        if path not in anchors:
+            anchors.append(path)
+        prov = section_dict.setdefault("provenance", {})
+        entry = prov.get(field)
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        entry["source"] = "user"
+        prov[field] = entry
 
     def _get_section(*names: str) -> list[str] | None:
         for n in names:
@@ -504,12 +605,20 @@ def parse_markdown(md: str, base: Profile) -> tuple[Profile, list[str]]:
         text = "\n".join(id_lines)
         m = _STATED_RE.search(text)
         if m:
-            identity["stated_self"] = m.group(1).strip()
+            new_self = m.group(1).strip()
+            old_self = str(identity.get("stated_self") or "").strip()
+            identity["stated_self"] = new_self
+            if new_self != old_self:
+                _anchor_field(identity, "identity", "stated_self")
         for line in id_lines:
             low = line.strip().lower()
             if low.startswith("principles you hold to:"):
                 rest = line.split(":", 1)[1]
-                identity["principles"] = _csv(rest)
+                new_principles = _csv(rest)
+                old_principles = [str(p).strip() for p in identity.get("principles", []) if str(p).strip()]
+                identity["principles"] = new_principles
+                if new_principles != old_principles:
+                    _anchor_field(identity, "identity", "principles")
 
     # ── List sections that map 1:1 by position ────────────────────────────────
     _apply_bullets(_get_section(_H_GOALS), goals, "text", "goals", _anchor, warnings)
@@ -544,13 +653,30 @@ def parse_markdown(md: str, base: Profile) -> tuple[Profile, list[str]]:
                 mm = re.search(r"-?[+]?\d+", line)
                 if mm:
                     try:
-                        baseline["typical_mood"] = int(mm.group().replace("+", ""))
+                        new_mood = int(mm.group().replace("+", ""))
                     except ValueError:
-                        pass
+                        continue
+                    if not (MOOD_MIN <= new_mood <= MOOD_MAX):
+                        warnings.append(
+                            f"Typical mood must be between {MOOD_MIN} and +{MOOD_MAX}, "
+                            "so that change was left as-is."
+                        )
+                        continue
+                    if new_mood != baseline.get("typical_mood"):
+                        baseline["typical_mood"] = new_mood
+                        _anchor_field(baseline, "baseline", "typical_mood")
             elif "set you off" in low or "trigger" in low:
-                baseline["known_triggers"] = _csv(line.split(":", 1)[-1])
+                new_triggers = _csv(line.split(":", 1)[-1])
+                old_triggers = [str(t).strip() for t in baseline.get("known_triggers", []) if str(t).strip()]
+                baseline["known_triggers"] = new_triggers
+                if new_triggers != old_triggers:
+                    _anchor_field(baseline, "baseline", "known_triggers")
             elif "helps you" in low or "what helps" in low:
-                baseline["what_helps"] = _csv(line.split(":", 1)[-1])
+                new_helps = _csv(line.split(":", 1)[-1])
+                old_helps = [str(h).strip() for h in baseline.get("what_helps", []) if str(h).strip()]
+                baseline["what_helps"] = new_helps
+                if new_helps != old_helps:
+                    _anchor_field(baseline, "baseline", "what_helps")
 
     updated = Profile(
         schema_version=base.schema_version,

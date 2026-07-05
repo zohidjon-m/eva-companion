@@ -26,11 +26,14 @@ from app import app
 # has something to surface. (Self-contained here so the suite doesn't depend on
 # any seed script.)
 DEMO_PROFILE: dict = {
-    "schema_version": 1,
+    "schema_version": 2,
     "identity": {
         "stated_self": "a good, masculine Muslim man",
         "principles": ["honesty", "discipline", "loyalty"],
-        "provenance": ["seed-entry-0001", "seed-entry-0006"],
+        "provenance": {
+            "stated_self": {"evidence": ["seed-entry-0001"], "source": "model", "last_seen": "2026-06-15"},
+            "principles": {"evidence": ["seed-entry-0006"], "source": "model", "last_seen": "2026-06-15"},
+        },
     },
     "goals": [
         {
@@ -82,7 +85,11 @@ DEMO_PROFILE: dict = {
         "typical_mood": 1,
         "known_triggers": ["fatigue", "conflict", "work deadlines"],
         "what_helps": ["prayer", "exercise", "an early night"],
-        "evidence": ["seed-entry-0003", "seed-entry-0008"],
+        "provenance": {
+            "typical_mood": {"source": "code", "evidence": ["seed-entry-0003", "seed-entry-0008"]},
+            "known_triggers": {"source": "model", "evidence": ["seed-entry-0003"], "last_seen": "2026-06-08"},
+            "what_helps": {"source": "model", "evidence": ["seed-entry-0008"], "last_seen": "2026-06-08"},
+        },
     },
     "open_loops": [
         {
@@ -130,9 +137,12 @@ def test_profile_json_conforms_to_7_2(seeded):
         "schema_version", "identity", "goals", "patterns", "relationships",
         "emotional_baseline", "open_loops", "watch_list", "anchors",
     ]
-    assert raw["schema_version"] == 1
+    assert raw["schema_version"] == 2
     assert set(raw["identity"]) >= {"stated_self", "principles", "provenance"}
     assert isinstance(raw["identity"]["principles"], list)
+    # v2 provenance is a field-keyed dict, each field carrying its own evidence.
+    assert isinstance(raw["identity"]["provenance"], dict)
+    assert set(raw["identity"]["provenance"]) >= {"stated_self", "principles"}
     assert set(raw["goals"][0]) >= {
         "id", "text", "status", "confidence", "last_seen", "evidence", "source",
     }
@@ -143,8 +153,9 @@ def test_profile_json_conforms_to_7_2(seeded):
         "name", "type", "summary", "evidence", "last_seen",
     }
     assert set(raw["emotional_baseline"]) >= {
-        "typical_mood", "known_triggers", "what_helps", "evidence",
+        "typical_mood", "known_triggers", "what_helps", "provenance",
     }
+    assert raw["emotional_baseline"]["provenance"]["typical_mood"]["source"] == "code"
     assert set(raw["open_loops"][0]) >= {
         "id", "description", "status", "opened", "last_updated", "evidence",
     }
@@ -240,6 +251,88 @@ def test_identity_edit_persists(seeded):
     edited = md.replace("honesty, discipline, loyalty", "honesty, patience")
     seeded.save_markdown(edited)
     assert seeded.get_profile().identity["principles"] == ["honesty", "patience"]
+
+
+def test_identity_edit_registers_field_anchor(seeded):
+    md = seeded.read_markdown()
+    edited = md.replace("honesty, discipline, loyalty", "honesty, patience")
+    seeded.save_markdown(edited)
+    p = seeded.get_profile()
+    # A corrected identity field is anchored by its synthetic path and marked
+    # source=user, so the model's update engine may not overwrite it (R7.5).
+    assert "identity.principles" in p.anchors
+    assert p.identity["provenance"]["principles"]["source"] == "user"
+    assert seeded.is_field_anchored(p, "identity.principles")
+
+
+def test_unedited_identity_field_is_not_anchored(seeded):
+    # Saving the profile unchanged must not spuriously anchor identity/baseline.
+    md = seeded.read_markdown()
+    seeded.save_markdown(md)
+    p = seeded.get_profile()
+    assert "identity.stated_self" not in p.anchors
+    assert "baseline.known_triggers" not in p.anchors
+
+
+def test_baseline_edit_registers_field_anchor(seeded):
+    md = seeded.read_markdown()
+    assert "fatigue, conflict, work deadlines" in md
+    edited = md.replace("fatigue, conflict, work deadlines", "fatigue, poor sleep")
+    seeded.save_markdown(edited)
+    p = seeded.get_profile()
+    assert p.emotional_baseline["known_triggers"] == ["fatigue", "poor sleep"]
+    assert "baseline.known_triggers" in p.anchors
+    assert p.emotional_baseline["provenance"]["known_triggers"]["source"] == "user"
+
+
+def test_out_of_range_typical_mood_is_rejected_with_warning(seeded):
+    md = seeded.read_markdown()
+    assert "Typical mood: +1" in md
+    edited = md.replace("Typical mood: +1", "Typical mood: +99")
+    _new_md, warnings = seeded.save_markdown(edited)
+    assert any("between" in w.lower() for w in warnings)
+    p = seeded.get_profile()
+    # The invalid value is not stored, and the field is not anchored to a typo.
+    assert p.emotional_baseline["typical_mood"] == 1
+    assert "baseline.typical_mood" not in p.anchors
+
+
+def test_in_range_typical_mood_edit_is_stored_and_anchored(seeded):
+    md = seeded.read_markdown()
+    edited = md.replace("Typical mood: +1", "Typical mood: -2")
+    seeded.save_markdown(edited)
+    p = seeded.get_profile()
+    assert p.emotional_baseline["typical_mood"] == -2
+    assert "baseline.typical_mood" in p.anchors
+    assert p.emotional_baseline["provenance"]["typical_mood"]["source"] == "user"
+
+
+def test_v1_profile_migrates_to_v2_on_read(prof):
+    v1 = {
+        "schema_version": 1,
+        "identity": {"stated_self": "x", "principles": ["a"], "provenance": ["seed-1"]},
+        "goals": [], "patterns": [], "relationships": [],
+        "emotional_baseline": {
+            "typical_mood": 1, "known_triggers": ["t"], "what_helps": ["h"],
+            "evidence": ["seed-2"],
+        },
+        "open_loops": [], "watch_list": [], "anchors": [],
+    }
+    path = prof._profile_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(v1), encoding="utf-8")
+
+    p = prof.get_profile()
+    assert p.schema_version == 2
+    # Old flat provenance/evidence lists become field-keyed dicts (empty until a
+    # rebuild re-derives them); the stale top-level baseline evidence is dropped.
+    assert isinstance(p.identity["provenance"], dict)
+    assert isinstance(p.emotional_baseline["provenance"], dict)
+    assert "evidence" not in p.emotional_baseline
+    # The migrated version is what persists on the next save.
+    prof.save_profile(p)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 2
 
 
 # ── graceful degradation ──────────────────────────────────────────────────────
