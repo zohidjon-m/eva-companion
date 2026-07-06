@@ -306,6 +306,66 @@ def test_model_claim_with_missing_evidence_is_not_prompt_injected(prof):
     assert claim["evidence"][0]["available"] is False
 
 
+# ── semantic relevance gate (augments the lexical match) ──────────────────────
+# These stub vector.semantic_scores so the gate logic is exercised deterministically
+# and offline (no embedding model needed). The message "…bailing on my workout"
+# shares NO content word with the "Train at the gym…" goal, so any surfacing is
+# purely the semantic half at work.
+
+
+def test_semantic_paraphrase_surfaces_goal(seeded, monkeypatch):
+    """A goal with no lexical overlap still surfaces when it's semantically close."""
+    def fake_scores(query, texts):
+        return [0.9 if "gym" in t.lower() else 0.0 for t in texts]
+
+    monkeypatch.setattr(seeded.vector, "semantic_scores", fake_scores)
+
+    slices = seeded.retrieve_slices("thinking of bailing on my workout")
+    assert any(s.kind == "goal" and "gym" in s.text.lower() for s in slices)
+
+
+def test_semantic_gate_respects_threshold(seeded, monkeypatch):
+    """A claim scoring just below the threshold is not injected (precision guard)."""
+    below = seeded.SEMANTIC_SLICE_THRESHOLD - 0.05
+    monkeypatch.setattr(seeded.vector, "semantic_scores", lambda q, texts: [below] * len(texts))
+
+    # No lexical overlap either, so below-threshold semantic → nothing surfaces.
+    assert seeded.retrieve_slices("thinking of bailing on my workout") == []
+
+
+def test_semantic_flag_off_is_pure_lexical(seeded, monkeypatch):
+    """With the flag off, semantic scores are never consulted — lexical only."""
+    monkeypatch.setattr(seeded, "SEMANTIC_SLICE_MATCHING", False)
+    # Would score everything maximally relevant — but the flag must short-circuit it.
+    monkeypatch.setattr(seeded.vector, "semantic_scores", lambda q, texts: [0.99] * len(texts))
+
+    assert seeded.retrieve_slices("thinking of bailing on my workout") == []
+
+
+def test_candidate_texts_match_loop_strings(seeded, monkeypatch):
+    """_candidate_texts must list exactly the strings the loop relevance-checks.
+
+    Guards against the two field-walks drifting apart (the semantic map is keyed by
+    these strings, so a mismatch would silently disable semantic matching for a claim).
+    """
+    monkeypatch.setattr(seeded.vector, "semantic_scores", lambda q, texts: [0.0] * len(texts))
+    prof = seeded.get_profile()
+    expected = set(seeded._candidate_texts(prof))
+
+    seen: set[str] = set()
+    real_is_relevant = seeded._is_relevant
+
+    def spy(claim_text, tokens):
+        seen.add(claim_text)
+        return real_is_relevant(claim_text, tokens)
+
+    monkeypatch.setattr(seeded, "_is_relevant", spy)
+    # A topic with a real token (so no early return) that lexically matches nothing,
+    # ensuring every candidate is still visited by the relevance gate.
+    seeded.retrieve_slices("xyzzy")
+    assert seen == expected
+
+
 # ── profile.md ↔ profile.json sync (§7.2) ─────────────────────────────────────
 
 

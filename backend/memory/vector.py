@@ -14,6 +14,7 @@ offline mode so the privacy net-guard is never tripped by an update check.
 from __future__ import annotations
 
 import logging
+import math
 import os
 
 # Force the embedding stack offline BEFORE fastembed/huggingface_hub import, so a
@@ -128,6 +129,38 @@ def _embed_query(query_text: str) -> list[list[float]]:
     live here, on the query, and nowhere on the stored side.
     """
     return _embed([f"{QUERY_PREFIX}{query_text}"])
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two vectors, in [-1, 1] (0 when either is zero-length).
+
+    Pure Python (no numpy dependency) — bge-small vectors are short (384-dim), so a
+    plain dot/norm is cheap and keeps this module dependency-light.
+    """
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def semantic_scores(query_text: str, candidate_texts: list[str]) -> list[float]:
+    """Cosine similarity of each candidate text to ``query_text``. Local, batched.
+
+    Used by L3 profile slice retrieval to find claims that are *about* the current
+    message even when they share no literal word with it (the semantic half of the
+    profile relevance gate). ``query_text`` is the chat message (embedded as the
+    asymmetric QUERY side, with the bge prefix); each candidate is a claim text
+    (embedded plain, the PASSAGE side) — the same asymmetry recall uses.
+
+    Returns one score per candidate, aligned by index; ``[]`` for empty input. One
+    batched :func:`_embed` call scores every candidate in a single model pass, so a
+    whole profile costs one query embed + one batched passage embed per turn.
+    """
+    if not query_text.strip() or not candidate_texts:
+        return []
+    query_vec = _embed_query(query_text)[0]
+    candidate_vecs = _embed(candidate_texts)
+    return [_cosine(query_vec, vec) for vec in candidate_vecs]
 
 
 def _get_client():

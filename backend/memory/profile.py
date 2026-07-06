@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import db, vault, vault_dir
+from . import vector
 
 log = logging.getLogger("eva.memory.profile")
 
@@ -73,6 +74,17 @@ _write_lock = threading.Lock()
 MIN_PROMPT_CONFIDENCE = 0.2
 MAX_PROMPT_SLICES = 6
 EVIDENCE_PREVIEW_CHARS = 180
+
+# Semantic relevance (augments the lexical `_is_relevant` gate). A claim is a
+# prompt candidate when it shares a word with the message OR is semantically close
+# to it, so a goal worded "train at the gym" still surfaces for "bailing on my
+# workout" (no shared word). Local embeddings only — never leaves the machine.
+# SEMANTIC_SLICE_MATCHING flips the whole semantic half off (instant rollback to
+# pure lexical). SEMANTIC_SLICE_THRESHOLD is a cosine similarity (higher = stricter);
+# tune it to sit in the gap between on-topic paraphrases and unrelated messages,
+# the same way retrieval.py centres its distance thresholds.
+SEMANTIC_SLICE_MATCHING = True
+SEMANTIC_SLICE_THRESHOLD = 0.62
 
 _SLICE_PRIORITY = {
     "goal": 0,
@@ -540,14 +552,85 @@ def _rank_slices(slices: list[ProfileSlice]) -> list[ProfileSlice]:
     )[:MAX_PROMPT_SLICES]
 
 
+def _candidate_texts(prof: Profile) -> list[str]:
+    """The exact claim strings :func:`retrieve_slices` checks for relevance, deduped.
+
+    This MUST stay in lock-step with the field walk in :func:`retrieve_slices`:
+    every string here is one that the loop there passes through the relevance gate,
+    so the semantic score map is keyed by the identical text.
+    ``test_candidate_texts_match_loop_strings`` guards against the two drifting apart.
+    """
+    texts: list[str] = []
+
+    def add(value: str) -> None:
+        cleaned = value.strip()
+        if cleaned and cleaned not in texts:
+            texts.append(cleaned)
+
+    add(str(prof.identity.get("stated_self") or ""))
+    principles = [str(p).strip() for p in prof.identity.get("principles", []) if str(p).strip()]
+    if principles:
+        add(_join(principles))
+
+    for goal in prof.goals:
+        if str(goal.get("status") or "active") == "active":
+            add(str(goal.get("text") or ""))
+
+    baseline = prof.emotional_baseline
+    helps = [str(h).strip() for h in baseline.get("what_helps", []) if str(h).strip()]
+    if helps:
+        add(_join(helps))
+    triggers = [str(t).strip() for t in baseline.get("known_triggers", []) if str(t).strip()]
+    if triggers:
+        add(_join(triggers))
+
+    for pattern in prof.patterns:
+        add(str(pattern.get("text") or ""))
+
+    for rel in prof.relationships:
+        name = str(rel.get("name") or "").strip()
+        summary = str(rel.get("summary") or "").strip()
+        if name:
+            add(f"{name} {summary}".strip())
+
+    for loop in prof.open_loops:
+        if str(loop.get("status") or "open") != "resolved":
+            add(str(loop.get("description") or ""))
+
+    for item in prof.watch_list:
+        add(str(item.get("description") or ""))
+
+    return texts
+
+
+def _semantic_scores_map(topic: str, prof: Profile) -> dict[str, float]:
+    """Return ``{claim_text: cosine-similarity-to-topic}`` for the profile's claims.
+
+    Wraps the local embedding call so any failure — most likely the embedding model
+    not yet downloaded on a fresh install — degrades to an empty map. The turn then
+    falls back to the lexical gate rather than crashing the reply.
+    """
+    texts = _candidate_texts(prof)
+    if not texts:
+        return {}
+    try:
+        scores = vector.semantic_scores(topic, texts)
+    except Exception:  # noqa: BLE001 — semantic relevance must never break a reply
+        log.exception("profile semantic scoring failed; falling back to lexical gate")
+        return {}
+    return dict(zip(texts, scores))
+
+
 def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSlice]:
     """Return typed, evidence-backed L3 slices relevant to one chat topic.
 
-    R9 replaces the old whole-profile prompt seam with a small retrieval step:
-    only claims sharing content words with ``topic`` are candidates, model-owned
-    claims must cite at least one real non-seeded entry, and low-confidence/stale
-    review items stay out of the prompt. ``advice_mode`` gives relevant goals and
-    values first rank so advice can be tailored without injecting unrelated facts.
+    A claim is a candidate when it shares a content word with ``topic`` (the lexical
+    gate) OR is semantically close to it (local embeddings, see
+    ``SEMANTIC_SLICE_MATCHING``), so a goal worded "train at the gym" still surfaces
+    for "bailing on my workout". Model-owned claims must still cite at least one real
+    non-seeded entry, and low-confidence/stale review items stay out of the prompt.
+    ``advice_mode`` gives relevant goals and values first rank so advice can be
+    tailored without injecting unrelated facts.
     """
     prof = get_profile()
     if prof is None:
@@ -557,12 +640,18 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
     if not tokens:
         return []
 
+    sem = _semantic_scores_map(topic, prof) if SEMANTIC_SLICE_MATCHING else {}
+
+    def _relevant(text: str) -> bool:
+        """Lexical word-overlap OR semantic similarity above the threshold."""
+        return _is_relevant(text, tokens) or sem.get(text, 0.0) >= SEMANTIC_SLICE_THRESHOLD
+
     conn = db.get_or_create_db()
     try:
         slices: list[ProfileSlice] = []
 
         stated_self = str(prof.identity.get("stated_self") or "").strip()
-        if stated_self and _is_relevant(stated_self, tokens):
+        if stated_self and _relevant(stated_self):
             _append_slice(
                 slices,
                 conn,
@@ -576,7 +665,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
 
         principles = [str(p).strip() for p in prof.identity.get("principles", []) if str(p).strip()]
         principles_text = _join(principles) if principles else ""
-        if principles_text and _is_relevant(principles_text, tokens):
+        if principles_text and _relevant(principles_text):
             _append_slice(
                 slices,
                 conn,
@@ -591,7 +680,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
         for goal in prof.goals:
             text = str(goal.get("text") or "").strip()
             status = str(goal.get("status") or "active")
-            if text and status == "active" and _is_relevant(text, tokens):
+            if text and status == "active" and _relevant(text):
                 _append_slice(
                     slices,
                     conn,
@@ -610,7 +699,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
         baseline = prof.emotional_baseline
         helps = [str(h).strip() for h in baseline.get("what_helps", []) if str(h).strip()]
         helps_text = _join(helps) if helps else ""
-        if helps_text and _is_relevant(helps_text, tokens):
+        if helps_text and _relevant(helps_text):
             _append_slice(
                 slices,
                 conn,
@@ -624,7 +713,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
 
         triggers = [str(t).strip() for t in baseline.get("known_triggers", []) if str(t).strip()]
         triggers_text = _join(triggers) if triggers else ""
-        if triggers_text and _is_relevant(triggers_text, tokens):
+        if triggers_text and _relevant(triggers_text):
             _append_slice(
                 slices,
                 conn,
@@ -638,7 +727,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
 
         for pattern in prof.patterns:
             text = str(pattern.get("text") or "").strip()
-            if text and _is_relevant(text, tokens):
+            if text and _relevant(text):
                 _append_slice(
                     slices,
                     conn,
@@ -658,7 +747,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
             name = str(rel.get("name") or "").strip()
             summary = str(rel.get("summary") or "").strip()
             blob = f"{name} {summary}".strip()
-            if name and _is_relevant(blob, tokens):
+            if name and _relevant(blob):
                 text = f"{name} - {summary}" if summary else name
                 _append_slice(
                     slices,
@@ -675,7 +764,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
         for loop in prof.open_loops:
             desc = str(loop.get("description") or "").strip()
             status = str(loop.get("status") or "open")
-            if desc and status != "resolved" and _is_relevant(desc, tokens):
+            if desc and status != "resolved" and _relevant(desc):
                 _append_slice(
                     slices,
                     conn,
@@ -692,7 +781,7 @@ def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSli
 
         for item in prof.watch_list:
             desc = str(item.get("description") or "").strip()
-            if desc and _is_relevant(desc, tokens):
+            if desc and _relevant(desc):
                 wid = f"watch:{item.get('pattern_id', '')}:{item.get('conflicting_goal_id', '')}"
                 _append_slice(
                     slices,
