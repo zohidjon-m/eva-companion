@@ -244,10 +244,25 @@ def compare_periods(
     include_seeded: bool = False,
     verifier: SyncVerifier | None = None,
 ) -> dict:
-    """Build the R10 descriptive growth report comparing two windows."""
+    """Build the R10 descriptive growth report comparing two windows.
+
+    The synchronous seam: high-impact claims are gated by an injected
+    ``verifier`` (used by tests). The live endpoint uses the async model-backed
+    :func:`compare_periods_verified` instead; see that function for the real path.
+    """
     pa = _period_summary(conn, a_from, a_to, include_seeded)
     pb = _period_summary(conn, b_from, b_to, include_seeded)
+    verified_claims = _verified_claims(pa, pb, verifier)
+    return _build_report(pa, pb, verified_claims)
 
+
+def _build_report(pa: dict, pb: dict, verified_claims: list[dict]) -> dict:
+    """Assemble the public growth report from two period summaries.
+
+    Shared by the sync (:func:`compare_periods`) and async
+    (:func:`compare_periods_verified`) paths so the report shape is identical
+    regardless of how ``verified_claims`` was gated.
+    """
     a_themes = {t["theme"] for t in pa["top_themes"]}
     b_themes = {t["theme"] for t in pb["top_themes"]}
     emerged = sorted(b_themes - a_themes)
@@ -257,7 +272,6 @@ def compare_periods(
     change, mood_desc = _mood_phrase(pa["avg_mood"], pb["avg_mood"])
     open_loop_delta = _open_loop_delta(pa, pb)
     behavior_delta = _behavior_delta(pa, pb)
-    verified_claims = _verified_claims(pa, pb, verifier)
 
     narrative: list[str] = [
         f"You wrote {pa['entry_count']} "
@@ -337,6 +351,54 @@ def auto_compare(conn, *, include_seeded: bool = False) -> dict | None:
     )
 
 
+async def compare_periods_verified(
+    conn,
+    *,
+    a_from: str,
+    a_to: str,
+    b_from: str,
+    b_to: str,
+    include_seeded: bool = False,
+    call_model: verification.ModelCaller | None = None,
+) -> dict:
+    """Async R10 growth report whose high-impact claims are model-verified.
+
+    Same report shape as :func:`compare_periods`, but ``verified_claims`` is gated
+    by the shared model (``call_model``), which resolves to the user's selected
+    provider — local llama-server or an online LLM — via
+    :mod:`memory.operations`. Fails closed: with ``call_model=None`` (no provider
+    configured) no high-impact claim is surfaced, exactly like the sync path with
+    no verifier.
+    """
+    pa = _period_summary(conn, a_from, a_to, include_seeded)
+    pb = _period_summary(conn, b_from, b_to, include_seeded)
+    verified_claims = await _verified_claims_async(pa, pb, call_model)
+    return _build_report(pa, pb, verified_claims)
+
+
+async def auto_compare_verified(
+    conn, *, include_seeded: bool = False, call_model: verification.ModelCaller | None = None
+) -> dict | None:
+    """Model-verified auto-split comparison, or None for short history."""
+    rng = _data_range(conn, include_seeded)
+    if rng is None:
+        return None
+    lo, hi = rng
+    if lo == hi:
+        return None
+    mid = _midpoint(lo, hi)
+    before_mid = (date.fromisoformat(mid) - timedelta(days=1)).isoformat()
+    return await compare_periods_verified(
+        conn,
+        a_from=lo,
+        a_to=before_mid,
+        b_from=mid,
+        b_to=hi,
+        include_seeded=include_seeded,
+        call_model=call_model,
+    )
+
+
 def _public_period(period: dict) -> dict:
     """Drop private parsed entries from a period summary before returning JSON."""
     return {k: v for k, v in period.items() if not k.startswith("_")}
@@ -368,8 +430,13 @@ def _behavior_delta(pa: dict, pb: dict) -> dict:
     }
 
 
-def _verified_claims(pa: dict, pb: dict, verifier_fn: SyncVerifier | None) -> list[dict]:
-    """Return high-impact claims only when an injected verifier supports them."""
+def _claim_candidates(pa: dict, pb: dict) -> list[tuple[str, list[str], list[str]]]:
+    """Return ``(claim, entry_ids, evidence)`` for every high-impact candidate.
+
+    Pure and deterministic — decides *which* statements need verification, not
+    whether they pass. Shared by the sync and async gates so both consider the
+    same claims from the same evidence.
+    """
     candidates: list[tuple[str, list[str], list[str]]] = []
     b_resolved = pb["open_loops"]["resolved"]
     if b_resolved["count"] > pa["open_loops"]["resolved"]["count"]:
@@ -388,10 +455,26 @@ def _verified_claims(pa: dict, pb: dict, verifier_fn: SyncVerifier | None) -> li
             entries,
             _summaries_for(pb["_entries"], entries),
         ))
+    return candidates
 
+
+def _verified_claims(pa: dict, pb: dict, verifier_fn: SyncVerifier | None) -> list[dict]:
+    """Return high-impact claims only when an injected verifier supports them."""
     out: list[dict] = []
-    for claim, entry_ids, evidence in candidates:
+    for claim, entry_ids, evidence in _claim_candidates(pa, pb):
         if verification.verify_claim_with_callable(claim, evidence, verifier_fn) is True:
+            out.append({"claim": claim, "entries": entry_ids})
+    return out
+
+
+async def _verified_claims_async(
+    pa: dict, pb: dict, call_model: verification.ModelCaller | None
+) -> list[dict]:
+    """Return high-impact claims the async model confirms are evidence-supported."""
+    out: list[dict] = []
+    for claim, entry_ids, evidence in _claim_candidates(pa, pb):
+        supported = await verification.verify_claim_supported(claim, evidence, call_model)
+        if supported is True:
             out.append({"claim": claim, "entries": entry_ids})
     return out
 

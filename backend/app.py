@@ -1300,7 +1300,7 @@ def insights_graph(
 
 
 @app.get("/insights/growth")
-def insights_growth(
+async def insights_growth(
     a_from: str | None = Query(None, description="Earlier period start, YYYY-MM-DD."),
     a_to: str | None = Query(None, description="Earlier period end, YYYY-MM-DD."),
     b_from: str | None = Query(None, description="Recent period start, YYYY-MM-DD."),
@@ -1316,18 +1316,30 @@ def insights_growth(
     path) to auto-split the available history at its midpoint. The doc's ``?a=&b=``
     is indicative — these named bounds are the concrete contract. A fresh vault
     returns ``{"empty": true}`` so the screen can show an empty state.
+
+    High-impact claims (``verified_claims``) are gated by the shared model — the
+    user's selected provider, local or online — and fail closed: if no provider is
+    configured the claims are simply dropped, so the report never asserts more than
+    the evidence supports. This is the one place the growth report touches the
+    model; it runs at background priority, so it never blocks a live chat turn.
     """
     explicit = [a_from, a_to, b_from, b_to]
     for label, value in (("a_from", a_from), ("a_to", a_to), ("b_from", b_from), ("b_to", b_to)):
         if value is not None and not _DATE_RE.match(value):
             raise HTTPException(status_code=400, detail=f"'{label}' must be YYYY-MM-DD")
 
+    # The verifier for high-impact claims uses whichever provider the user selected
+    # (local llama-server or an online LLM). None when unconfigured → claims drop.
+    from memory import operations
+    from llm import client as llm_client
+    call_model = operations._llama_server_call if llm_client.provider_configured() else None
+
     conn = db.get_or_create_db()
     try:
         if all(v is not None for v in explicit):
-            report = growth_l4.compare_periods(
+            report = await growth_l4.compare_periods_verified(
                 conn, a_from=a_from, a_to=a_to, b_from=b_from, b_to=b_to,
-                include_seeded=include_seeded,
+                include_seeded=include_seeded, call_model=call_model,
             )
         elif any(v is not None for v in explicit):
             raise HTTPException(
@@ -1335,7 +1347,9 @@ def insights_growth(
                 detail="Pass all of a_from, a_to, b_from, b_to — or none (to auto-split).",
             )
         else:
-            report = growth_l4.auto_compare(conn, include_seeded=include_seeded)
+            report = await growth_l4.auto_compare_verified(
+                conn, include_seeded=include_seeded, call_model=call_model,
+            )
     finally:
         conn.close()
 

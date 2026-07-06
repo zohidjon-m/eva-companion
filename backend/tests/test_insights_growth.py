@@ -236,3 +236,91 @@ def test_bad_date_rejected(client):
         "a_from": "june", "a_to": "2026-06-05",
         "b_from": "2026-06-08", "b_to": "2026-06-12",
     }).status_code == 400
+
+
+def _high_impact_seed(conn):
+    """Seed one earlier + one recent entry that yield a high-impact candidate."""
+    _entry(
+        conn,
+        date="2026-06-01",
+        mood=0,
+        themes=["exercise"],
+        stated_goals=[{"text": "exercise regularly", "is_new": True}],
+    )
+    _entry(
+        conn,
+        date="2026-06-10",
+        mood=0,
+        themes=["exercise"],
+        stated_goals=[{"text": "exercise regularly", "is_new": False}],
+        behaviors=["skipped exercise"],
+        open_loops=[{"description": "book dentist", "status": "resolved"}],
+    )
+
+
+def test_compare_periods_verified_surfaces_model_supported_claims(client):
+    import asyncio
+
+    conn = db.get_or_create_db()
+    _high_impact_seed(conn)
+
+    async def yes_model(_prompt, *, temperature, max_tokens):
+        return "yes"
+
+    async def no_model(_prompt, *, temperature, max_tokens):
+        return "no"
+
+    kept = asyncio.run(growth.compare_periods_verified(
+        conn, a_from="2026-06-01", a_to="2026-06-05",
+        b_from="2026-06-08", b_to="2026-06-12", call_model=yes_model,
+    ))
+    dropped = asyncio.run(growth.compare_periods_verified(
+        conn, a_from="2026-06-01", a_to="2026-06-05",
+        b_from="2026-06-08", b_to="2026-06-12", call_model=no_model,
+    ))
+    unconfigured = asyncio.run(growth.compare_periods_verified(
+        conn, a_from="2026-06-01", a_to="2026-06-05",
+        b_from="2026-06-08", b_to="2026-06-12", call_model=None,
+    ))
+    conn.close()
+
+    assert kept["verified_claims"]           # model confirmed → surfaced
+    assert dropped["verified_claims"] == []  # model rejected → dropped
+    assert unconfigured["verified_claims"] == []  # no provider → fail closed
+
+
+def test_growth_endpoint_verifies_claims_with_selected_provider(client, monkeypatch):
+    from llm import client as llm_client
+    from memory import operations
+
+    conn = db.get_or_create_db()
+    _high_impact_seed(conn)
+    conn.close()
+
+    async def fake_call(_prompt, *, temperature, max_tokens):
+        return "yes"
+
+    monkeypatch.setattr(llm_client, "provider_configured", lambda: True)
+    monkeypatch.setattr(operations, "_llama_server_call", fake_call)
+
+    body = client.get("/insights/growth", params={
+        "a_from": "2026-06-01", "a_to": "2026-06-05",
+        "b_from": "2026-06-08", "b_to": "2026-06-12",
+    }).json()
+    assert body["verified_claims"], "a configured provider that confirms should surface claims"
+
+
+def test_growth_endpoint_drops_claims_when_no_provider(client, monkeypatch):
+    from llm import client as llm_client
+
+    conn = db.get_or_create_db()
+    _high_impact_seed(conn)
+    conn.close()
+
+    monkeypatch.setattr(llm_client, "provider_configured", lambda: False)
+
+    body = client.get("/insights/growth", params={
+        "a_from": "2026-06-01", "a_to": "2026-06-05",
+        "b_from": "2026-06-08", "b_to": "2026-06-12",
+    }).json()
+    assert body["verified_claims"] == []
