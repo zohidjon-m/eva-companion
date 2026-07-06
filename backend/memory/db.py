@@ -39,7 +39,9 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # persist and reopen full conversations (both sides), separate from the journal.
 # v4 (R2 / Phase 3.5): added `extractions.source_hash` and a unique extraction
 # row per stable entry UID.
-SCHEMA_USER_VERSION = 4
+# v5 (R8 / Phase 14): added `extractions.consolidated` so the write loop folds each
+# entry into L3 exactly once, even if its extraction finished after its day's run.
+SCHEMA_USER_VERSION = 5
 
 
 def db_path() -> Path:
@@ -113,6 +115,12 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
             "ON extractions(entry_id)"
         )
         log.info("migrated eva.db schema v3 → v4 (source_hash + extraction uid index)")
+    if from_version < 5:
+        # v4 → v5: the R8 per-entry consolidation flag. Existing rows default to 0
+        # (unconsolidated) so the first consolidation sweep folds the back catalogue
+        # in once, then marks it — never double-counting on later runs.
+        _add_column_if_missing(conn, "extractions", "consolidated", "INTEGER NOT NULL DEFAULT 0")
+        log.info("migrated eva.db schema v4 → v5 (extractions.consolidated)")
     conn.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION};")
 
 
@@ -514,7 +522,10 @@ def finalize_extraction(
             decisions=:decisions, open_loops=:open_loops,
             self_judgments=:self_judgments, summary=:summary,
             extracted_at=:extracted_at,
-            source_hash=COALESCE(:source_hash, source_hash)
+            source_hash=COALESCE(:source_hash, source_hash),
+            -- R8: a fresh (or re-run after an edit) extraction is un-consolidated, so
+            -- the next consolidation folds the new content into L3 and revalidates.
+            consolidated=0
         WHERE entry_id=:entry_id
         """,
         {**values, "entry_id": entry_id},
@@ -940,3 +951,158 @@ def all_done_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY e.date ASC
         """
     ).fetchall()
+
+
+def entries_for_consolidation(
+    conn: sqlite3.Connection,
+    *,
+    date_from: str,
+    date_to: str,
+    include_seeded: bool = False,
+    only_unconsolidated: bool = False,
+) -> list[sqlite3.Row]:
+    """Return the full L1 extraction for every entry in an inclusive date window.
+
+    The R8 consolidation input (:mod:`memory.consolidate`). Unlike
+    :func:`real_extractions` (mood/themes only), this carries every structured field
+    the nightly/weekly miners count over — ``stated_goals``, ``behaviors``,
+    ``open_loops``, ``self_judgments``, ``decisions``, ``events`` — plus the entry's
+    ``id``/``date``/``text``, ``summary`` and its ``consolidated`` flag. Only ``done``
+    extractions are returned (a ``pending``/``null_stored`` row carries nothing to
+    mine). ``only_unconsolidated=True`` further restricts to entries not yet folded
+    into L3 — the set the L3 write path processes, so each entry contributes exactly
+    once no matter when its extraction finished. Live data is ``is_seeded = 0``;
+    ``include_seeded=True`` lifts that for a backdated ``# DEV-FIXTURE`` window.
+    Ordered by day then capture time then rowid so a window replays in a **stable**
+    order.
+    """
+    clauses = ["x.extraction_status = 'done'", "e.date >= ?", "e.date <= ?"]
+    params: list = [date_from, date_to]
+    if not include_seeded:
+        clauses.append("e.is_seeded = 0")
+    if only_unconsolidated:
+        clauses.append("x.consolidated = 0")
+    return conn.execute(
+        f"""
+        SELECT
+            e.id             AS entry_id,
+            e.date           AS date,
+            e.text           AS text,
+            x.mood           AS mood,
+            x.emotions       AS emotions,
+            x.themes         AS themes,
+            x.entities       AS entities,
+            x.events         AS events,
+            x.stated_goals   AS stated_goals,
+            x.behaviors      AS behaviors,
+            x.decisions      AS decisions,
+            x.open_loops     AS open_loops,
+            x.self_judgments AS self_judgments,
+            x.summary        AS summary,
+            x.consolidated   AS consolidated
+        FROM entries e
+        JOIN extractions x ON x.entry_id = e.id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY e.date ASC, e.created_at ASC, e.rowid ASC
+        """,
+        params,
+    ).fetchall()
+
+
+def mark_entries_consolidated(conn: sqlite3.Connection, entry_ids: list[str]) -> int:
+    """Flag entries as folded into L3, so a later run never double-counts them (R8).
+
+    Called after a nightly/weekly L3 update over ``entry_ids``. Idempotent; returns
+    the number of rows updated.
+    """
+    if not entry_ids:
+        return 0
+    placeholders = ",".join("?" for _ in entry_ids)
+    cur = conn.execute(
+        f"UPDATE extractions SET consolidated = 1 WHERE entry_id IN ({placeholders})",
+        entry_ids,
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+# ── rollup digests (week → month → era) ───────────────────────────────────────
+def insert_digest(
+    conn: sqlite3.Connection,
+    *,
+    level: str,
+    period_start: str,
+    period_end: str,
+    summary: str | None,
+    stats: dict,
+    created_at: str,
+) -> str:
+    """Persist one rollup digest row and return its id (§3/§5.5 map-reduce output).
+
+    ``level`` is ``week``/``month``/``era`` (the schema CHECK enforces it). ``stats``
+    is JSON-encoded. One row per (level, period): a re-run for the same period
+    replaces the prior row so re-consolidating a window is idempotent.
+    """
+    conn.execute(
+        "DELETE FROM digests WHERE level = ? AND period_start = ? AND period_end = ?",
+        (level, period_start, period_end),
+    )
+    digest_id = str(uuid.uuid4())
+    conn.execute(
+        """
+        INSERT INTO digests (id, level, period_start, period_end, summary, stats, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            digest_id, level, period_start, period_end, summary,
+            json.dumps(stats, ensure_ascii=False), created_at,
+        ),
+    )
+    conn.commit()
+    return digest_id
+
+
+def digests_for_level(
+    conn: sqlite3.Connection,
+    level: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    by_period_end: bool = False,
+) -> list[sqlite3.Row]:
+    """Return digests at one ``level``, oldest first, optionally within a window.
+
+    The month rollup reduces the ``week`` rows in its span; the era rollup reduces
+    the ``month`` rows — so each level reads only the level below via this helper,
+    never the raw entries (that is what keeps every model input a bounded window).
+
+    ``by_period_end`` selects children by where their ``period_end`` falls (both
+    bounds compared against ``period_end``) instead of any *overlap* with the window.
+    Rollups use this so each child belongs to exactly one parent — otherwise a week
+    straddling two months would be counted in both months, and then twice again in
+    the era sum.
+    """
+    clauses = ["level = ?"]
+    params: list = [level]
+    # Overlap mode brackets the window with (period_end >= from, period_start <= to);
+    # containment mode brackets both ends against period_end so each child lands in
+    # exactly one parent.
+    upper_col = "period_end" if by_period_end else "period_start"
+    if date_from is not None:
+        clauses.append("period_end >= ?")
+        params.append(date_from)
+    if date_to is not None:
+        clauses.append(f"{upper_col} <= ?")
+        params.append(date_to)
+    return conn.execute(
+        f"SELECT * FROM digests WHERE {' AND '.join(clauses)} ORDER BY period_start ASC",
+        params,
+    ).fetchall()
+
+
+def latest_digest(conn: sqlite3.Connection, level: str) -> sqlite3.Row | None:
+    """Return the most recent digest at ``level`` (by period end), or ``None``."""
+    return conn.execute(
+        "SELECT * FROM digests WHERE level = ? ORDER BY period_end DESC, created_at DESC LIMIT 1",
+        (level,),
+    ).fetchone()

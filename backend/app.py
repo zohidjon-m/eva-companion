@@ -48,6 +48,12 @@ from net_guard import allow_summary, install_net_guard, is_installed
 # the journal browse / read-only day view.
 from memory import capture, conversations, db, vault, vault_dir
 
+# R8 consolidation write loop: on_save (the post-capture hook every entry flows
+# through) and the nightly/weekly cadences, driven off the real-time path by the
+# scheduler below.
+from memory import consolidate
+import scheduler as consolidation_scheduler
+
 # Phase 14 L4 insights (the seams): the seeded knowledge graph and the descriptive
 # growth report behind GET /insights/graph and GET /insights/growth. Both read the
 # same extracted data the mood chart uses. # DEMO-STUB until the real L4 builder.
@@ -101,6 +107,11 @@ BACKEND_PORT = 8000
 # The supervised model server. §4: the backend owns the model server's lifecycle.
 _llama = llm_server.LlamaServer()
 _supervisor_task: asyncio.Task | None = None
+
+# R8 background write loop. Started only on a real app run (autostart), so importing
+# the app under a TestClient never kicks off consolidation; tests drive the cadences
+# through POST /consolidate instead.
+_scheduler = consolidation_scheduler.ConsolidationScheduler()
 
 
 def _prewarm_voice_if_enabled() -> None:
@@ -169,6 +180,32 @@ def _autostart_enabled() -> bool:
     return os.environ.get("EVA_START_LLAMA", "").strip().lower() in {"1", "true", "yes"}
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def _scheduler_autostart() -> bool:
+    """Whether to run the R8 consolidation scheduler on this backend process.
+
+    Decoupled from the model server: consolidation is valuable in online-provider
+    mode too, where no local llama autostart happens. It runs on a real backend run —
+    the local-AI launcher already sets ``EVA_START_LLAMA``; other launches (online
+    mode, manual) opt in with ``EVA_START_SCHEDULER`` — and stays off under a
+    TestClient import (neither is set), so tests drive the cadences explicitly.
+    """
+    return _autostart_enabled() or _truthy_env("EVA_START_SCHEDULER")
+
+
+def _consolidate_http_enabled() -> bool:
+    """Whether the manual ``POST /consolidate`` trigger is exposed (off by default).
+
+    It is a test/dev affordance, not a product surface, so it is gated behind
+    ``EVA_ENABLE_CONSOLIDATE_HTTP`` and returns 404 otherwise. Even when enabled it is
+    safe against races: the cadences serialise on :data:`memory.consolidate._job_lock`.
+    """
+    return _truthy_env("EVA_ENABLE_CONSOLIDATE_HTTP")
+
+
 def _ensure_local_llama_running() -> None:
     """Start the local llama.cpp server on demand when that provider is selected."""
     if llm_providers.selected_provider_id() != llm_providers.LOCAL_LLAMA_CPP:
@@ -197,9 +234,17 @@ async def lifespan(app: FastAPI):
     # Warm Eva's voice ahead of the first spoken turn when voice is on (no-op
     # otherwise), so the first reply speaks promptly instead of stalling on load.
     _prewarm_voice_if_enabled()
+    # Start the R8 consolidation write loop on a real app run (any provider) — it
+    # defers to chat and yields the model, so it never contends with the real-time
+    # path. Off under TestClient, where tests drive the cadences explicitly.
+    scheduler_running = _scheduler_autostart()
+    if scheduler_running:
+        _scheduler.start()
     try:
         yield
     finally:
+        if scheduler_running:
+            await _scheduler.stop()
         if _supervisor_task is not None:
             _supervisor_task.cancel()
         _llama.stop()
@@ -437,7 +482,7 @@ def _capture_user_turn(text: str) -> None:
     except Exception:  # noqa: BLE001 — capture must never break the reply
         log.exception("failed to capture chat turn (continuing with reply)")
         return
-    asyncio.create_task(capture.run_extraction_and_embed(rec.id, rec.text, rec.date))
+    asyncio.create_task(consolidate.on_save(rec.id, rec.text, rec.date))
 
 
 @app.websocket("/chat")
@@ -660,8 +705,31 @@ def create_entry(body: EntryIn, background: BackgroundTasks) -> dict:
         rec = capture.capture_entry(body.text, body.type)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    background.add_task(capture.run_extraction_and_embed, rec.id, rec.text, rec.date)
+    background.add_task(consolidate.on_save, rec.id, rec.text, rec.date)
     return {"id": rec.id, "date": rec.date, "type": rec.type, "word_count": rec.word_count}
+
+
+@app.post("/consolidate")
+async def trigger_consolidate(scope: str = Query("nightly")) -> dict:
+    """Manually run a consolidation cadence — for tests and local runs only.
+
+    The write loop normally fires on the scheduler's idle cadence
+    (:mod:`scheduler`); this endpoint lets a test or a developer drive
+    :func:`memory.consolidate.run_nightly` / :func:`~memory.consolidate.run_weekly`
+    synchronously and inspect the resulting report. ``scope`` is ``nightly`` or
+    ``weekly``. Not part of the product surface — gated off by default
+    (``EVA_ENABLE_CONSOLIDATE_HTTP``) and serialised against the scheduler by the
+    consolidation job lock, so it can't race a background run.
+    """
+    if not _consolidate_http_enabled():
+        raise HTTPException(status_code=404, detail="not found")
+    if scope == "nightly":
+        report = await consolidate.run_nightly()
+    elif scope == "weekly":
+        report = await consolidate.run_weekly()
+    else:
+        raise HTTPException(status_code=400, detail="scope must be 'nightly' or 'weekly'")
+    return {"scope": scope, "report": asdict(report)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -725,7 +793,7 @@ def save_journal(body: JournalIn, background: BackgroundTasks) -> dict:
         rec = capture.capture_entry(body.text, "journal")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    background.add_task(capture.run_extraction_and_embed, rec.id, rec.text, rec.date)
+    background.add_task(consolidate.on_save, rec.id, rec.text, rec.date)
     return {
         "id": rec.id,
         "date": rec.date,

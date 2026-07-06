@@ -117,6 +117,10 @@ class AppliedReport:
     principles_added: int = 0
     baseline_items_added: int = 0
     rejected: int = 0
+    # False when the model's operation generation failed on both attempts (as opposed
+    # to succeeding with no changes). Consolidation uses this to avoid marking entries
+    # processed when L3 generation never actually ran — see :func:`generate_operations`.
+    generation_ok: bool = True
     reasons: list = field(default_factory=list)
 
     def _reject(self, why: str) -> None:
@@ -220,36 +224,68 @@ def apply_operations(
                     return claim
         return None
 
+    def _find_by_text(text: str, claims: list[dict]) -> dict | None:
+        """An existing claim with the same normalised text (the dedupe guard).
+
+        The prompt tells the model never to restate an existing claim, but a slip —
+        within one batch, or across the overlapping nightly/weekly passes — would
+        otherwise append a literal duplicate. Matching on normalised text lets an
+        ``add_*`` fold into the existing claim (as a strengthen) instead.
+        """
+        norm = str(text).strip().lower()
+        return next(
+            (c for c in claims if str(c.get("text", "")).strip().lower() == norm), None
+        )
+
     for op in valid:
         verb = op["op"]
 
         if verb == "add_goal":
-            goals.append({
-                "id": f"g-{uuid.uuid4()}",
-                "text": str(op["text"]).strip(),
-                "status": "active",
-                "confidence": NEW_CLAIM_CONFIDENCE,
-                "last_seen": today,
-                "evidence": _cited(op),
-                "source": "model",
-            })
-            report.added += 1
+            dup = _find_by_text(op["text"], goals)
+            if dup is not None and _is_anchored(dup):
+                report._reject(f"add_goal: {op['text']!r} matches a user-anchored goal")
+            elif dup is not None:
+                # Deterministic merge: fold the restated goal into the existing claim.
+                dup["confidence"] = _clamp(_conf(dup) + STRENGTHEN_DELTA)
+                dup["evidence"] = _merge_evidence(dup, _cited(op))
+                dup["last_seen"] = today
+                report.strengthened += 1
+            else:
+                goals.append({
+                    "id": f"g-{uuid.uuid4()}",
+                    "text": str(op["text"]).strip(),
+                    "status": "active",
+                    "confidence": NEW_CLAIM_CONFIDENCE,
+                    "last_seen": today,
+                    "evidence": _cited(op),
+                    "source": "model",
+                })
+                report.added += 1
 
         elif verb == "add_pattern":
             ptype = str(op["type"]).strip().lower()
             if ptype not in PATTERN_TYPES:
                 report._reject(f"add_pattern: invalid type {op['type']!r}")
                 continue
-            patterns.append({
-                "id": f"p-{uuid.uuid4()}",
-                "text": str(op["text"]).strip(),
-                "type": ptype,
-                "confidence": NEW_CLAIM_CONFIDENCE,
-                "last_seen": today,
-                "evidence": _cited(op),
-                "source": "model",
-            })
-            report.added += 1
+            dup = _find_by_text(op["text"], patterns)
+            if dup is not None and _is_anchored(dup):
+                report._reject(f"add_pattern: {op['text']!r} matches a user-anchored pattern")
+            elif dup is not None:
+                dup["confidence"] = _clamp(_conf(dup) + STRENGTHEN_DELTA)
+                dup["evidence"] = _merge_evidence(dup, _cited(op))
+                dup["last_seen"] = today
+                report.strengthened += 1
+            else:
+                patterns.append({
+                    "id": f"p-{uuid.uuid4()}",
+                    "text": str(op["text"]).strip(),
+                    "type": ptype,
+                    "confidence": NEW_CLAIM_CONFIDENCE,
+                    "last_seen": today,
+                    "evidence": _cited(op),
+                    "source": "model",
+                })
+                report.added += 1
 
         elif verb == "strengthen":
             claim = _find(op["claim_id"], goals, patterns)
@@ -538,14 +574,19 @@ async def generate_operations(
     profile: Profile,
     *,
     call_model: ModelCaller | None = None,
-) -> list[dict]:
+) -> list[dict] | None:
     """Ask the model for a batch of §7.3 operations over ``entries``.
 
     Runs the model once, retrying once at 0.3 if the output does not parse as a JSON
     array. Returns the raw (unvalidated) operation dicts — the evidence gate lives in
-    :func:`validate_operations`/:func:`apply_operations`. Never raises: on a double
-    failure it returns ``[]`` (no update this cycle), mirroring extraction's
-    ``null_stored`` contract.
+    :func:`validate_operations`/:func:`apply_operations`. Never raises. The empty case
+    is disambiguated so a caller can tell "nothing to change" from "couldn't run":
+
+    * ``[]`` — the model ran and legitimately proposed no change (or ``entries`` was
+      empty). These entries are considered processed.
+    * ``None`` — the model call or parse failed on *both* attempts. No update this
+      cycle; the caller should NOT treat the entries as processed (so a consolidation
+      run can retry them next time rather than dropping their L3 contribution).
     """
     if not entries:
         return []
@@ -566,7 +607,7 @@ async def generate_operations(
         return [op for op in ops if isinstance(op, dict)]
 
     log.error("operation generation failed twice; no operations this cycle")
-    return []
+    return None
 
 
 async def update_profile_from_entries(
@@ -587,8 +628,10 @@ async def update_profile_from_entries(
     today = today or today_str()
     base = profile_mod.get_profile() or Profile()
     ops = await generate_operations(entries, base, call_model=call_model)
+    generation_ok = ops is not None       # None == both model/parse attempts failed
     known = {str(e.get("entry_id")) for e in entries if e.get("entry_id")}
     applied, report = apply_operations(base, ops, known_entry_ids=known, today=today)
+    report.generation_ok = generation_ok
     decayed = apply_decay(applied, today=today)
     decayed = apply_typical_mood(decayed, _load_mood_history())
     profile_mod.save_profile(decayed)

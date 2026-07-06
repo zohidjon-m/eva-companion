@@ -95,6 +95,18 @@ async def _model_access(priority: bool):
             _chat_waiting -= 1
 
 
+def chat_active() -> bool:
+    """True while a real-time chat turn is pending or in flight (EVA_SYSTEM_DESIGN §8).
+
+    Reads the same ``_chat_waiting`` counter the priority lock uses, so the R8
+    consolidation scheduler (:mod:`scheduler`) can *defer starting* a background job
+    while the user is mid-conversation — belt-and-suspenders over the priority lock,
+    which already makes any background model call yield to chat. A cheap, race-tolerant
+    check: it can only be stale for one poll tick, and the lock is the real guarantee.
+    """
+    return _chat_waiting > 0
+
+
 def _strip_leaks(text: str) -> str:
     """Remove any leaked special tokens from visible model output."""
     for tok in _LEAK_TOKENS:
