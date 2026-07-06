@@ -79,6 +79,20 @@ def test_add_goal_and_add_pattern_start_at_half_confidence():
     assert updated.patterns[0]["type"] == "behavior"
 
 
+def test_weaken_records_counter_evidence_and_reason_without_polluting_support():
+    base = Profile(goals=[_goal("g1", "Train at the gym", conf=0.6, evidence=["e1"])])
+    ops = [{"op": "weaken", "claim_id": "g1", "reason": "skipped all week", "evidence": ["e2"]}]
+    updated, report = operations.apply_operations(
+        base, ops, known_entry_ids={"e1", "e2"}, today="2026-07-05"
+    )
+    assert report.weakened == 1
+    g = updated.goals[0]
+    assert g["confidence"] == pytest.approx(0.45)     # 0.6 − 0.15
+    assert g["counter_evidence"] == ["e2"]            # the contradicting entry is kept
+    assert g["evidence"] == ["e1"]                    # supporting evidence untouched
+    assert g["weaken_reason"] == "skipped all week"
+
+
 def test_add_pattern_rejects_type_outside_the_enum():
     base = Profile()
     ops = [
@@ -266,8 +280,14 @@ def vault_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _seed_l1_entry(db, entry_id, *, date, summary, themes, created_at=None):
-    """Insert one real (non-seeded) done extraction so real_extractions sees it."""
+def _seed_l1_entry(db, entry_id, *, date, summary, themes, mood=1, created_at=None):
+    """Insert one real (non-seeded) done extraction so real_extractions sees it.
+
+    Writes ``extractions.mood`` (the canonical mood column, source for both the L3
+    typical_mood and the denormalised ``mood_series`` chart cache). It intentionally
+    does not populate ``mood_series`` — typical_mood is derived from
+    ``extractions.mood`` via :func:`db.mood_history`, not the chart cache.
+    """
     conn = db.get_or_create_db()
     try:
         db.insert_entry(
@@ -277,7 +297,7 @@ def _seed_l1_entry(db, entry_id, *, date, summary, themes, created_at=None):
         )
         db.create_pending_extraction(conn, entry_id, source_hash=f"h-{entry_id}")
         db.finalize_extraction(
-            conn, entry_id, mood=1, emotions=[], entities=[], themes=themes,
+            conn, entry_id, mood=mood, emotions=[], entities=[], themes=themes,
             events=[], stated_goals=[], behaviors=[], decisions=[], open_loops=[],
             self_judgments=[], summary=summary, extracted_at=f"{date}T08:00:05",
             source_hash=f"h-{entry_id}",
@@ -356,6 +376,29 @@ def test_editing_an_entry_flags_dependent_claims_stale(vault_env):
     assert "needs_revalidation" not in g2           # untouched
 
 
+def test_editing_a_counter_evidence_entry_flags_the_weakened_claim(vault_env):
+    from memory import capture, profile, vault
+
+    rec = vault.save_entry("A day I skipped the gym.", "journal")
+    # A claim whose confidence was eroded by a weaken citing rec.id as counter-evidence
+    # (its support lives elsewhere). Editing that entry must still trigger a re-audit.
+    profile.save_profile(Profile(goals=[_goal("g1", "gym goal", evidence=["support-entry"])]))
+    p = profile.get_profile()
+    p.goals[0]["counter_evidence"] = [rec.id]
+    profile.save_profile(p)
+
+    vault.update_entry(rec.id, "Edited: actually I did go.")
+    caller = make_caller(
+        '{"mood": 2, "emotions": [], "entities": [], "themes": ["gym"], '
+        '"events": [], "stated_goals": [], "behaviors": [], "decisions": [], '
+        '"open_loops": [], "self_judgments": [], '
+        '"summary": "They went to the gym after all."}'
+    )
+    asyncio.run(capture.recompute_entry(rec.id, call_model=caller))
+
+    assert profile.get_profile().goals[0].get("needs_revalidation") is True
+
+
 def test_failed_recompute_still_flags_dependent_claims(vault_env):
     from memory import capture, profile, vault
 
@@ -428,3 +471,211 @@ def test_engine_runs_on_empty_vault_without_crashing(vault_env):
     )
     assert report.added == 0
     assert profile.get_profile() is not None    # an (empty) profile was written
+
+
+# ── R7.5: evidence-backed identity & emotional baseline ───────────────────────
+def test_set_identity_and_add_principle_are_evidence_backed():
+    ops = [
+        {"op": "set_identity", "text": "A disciplined Muslim man", "evidence": ["e1"]},
+        {"op": "add_principle", "text": "honesty", "evidence": ["e2"]},
+        {"op": "add_principle", "text": "discipline", "evidence": ["e2"]},
+    ]
+    updated, report = operations.apply_operations(
+        Profile(), ops, known_entry_ids={"e1", "e2"}, today="2026-07-05"
+    )
+    assert report.identity_set == 1
+    assert report.principles_added == 2
+    assert updated.identity["stated_self"] == "A disciplined Muslim man"
+    assert updated.identity["principles"] == ["honesty", "discipline"]
+    prov = updated.identity["provenance"]
+    assert prov["stated_self"] == {
+        "evidence": ["e1"], "source": "model", "last_seen": "2026-07-05"
+    }
+    assert prov["principles"]["evidence"] == ["e2"]
+    assert prov["principles"]["source"] == "model"
+
+
+def test_add_principle_dedupes_case_insensitively():
+    base = Profile(identity={"stated_self": "", "principles": ["Honesty"]})
+    ops = [{"op": "add_principle", "text": "honesty", "evidence": ["e1"]}]
+    updated, report = operations.apply_operations(base, ops, known_entry_ids={"e1"})
+    assert report.principles_added == 0
+    assert report.rejected == 1
+    assert updated.identity["principles"] == ["Honesty"]
+
+
+def test_add_baseline_item_appends_and_rejects_invalid_field():
+    ops = [
+        {"op": "add_baseline_item", "field": "known_triggers", "text": "poor sleep", "evidence": ["e1"]},
+        {"op": "add_baseline_item", "field": "what_helps", "text": "running", "evidence": ["e2"]},
+        # typical_mood is code-owned — no verb may write it.
+        {"op": "add_baseline_item", "field": "typical_mood", "text": "3", "evidence": ["e1"]},
+    ]
+    updated, report = operations.apply_operations(
+        Profile(), ops, known_entry_ids={"e1", "e2"}, today="2026-07-05"
+    )
+    assert report.baseline_items_added == 2
+    assert updated.emotional_baseline["known_triggers"] == ["poor sleep"]
+    assert updated.emotional_baseline["what_helps"] == ["running"]
+    assert "typical_mood" not in updated.emotional_baseline
+    assert any("invalid field" in r for r in report.reasons)
+
+
+def test_identity_baseline_ops_rejected_without_known_evidence():
+    ops = [
+        {"op": "set_identity", "text": "x", "evidence": ["ghost"]},
+        {"op": "add_principle", "text": "y", "evidence": []},
+        {"op": "add_baseline_item", "field": "what_helps", "text": "z", "evidence": ["ghost"]},
+    ]
+    updated, report = operations.apply_operations(Profile(), ops, known_entry_ids={"e1"})
+    assert report.identity_set == 0
+    assert report.principles_added == 0
+    assert report.baseline_items_added == 0
+    assert report.rejected == 3
+    assert updated.identity.get("stated_self") in (None, "")
+    assert updated.emotional_baseline.get("what_helps") in (None, [])
+
+
+def test_anchored_identity_baseline_fields_reject_model_overwrite():
+    base = Profile(
+        identity={
+            "stated_self": "as the user put it",
+            "principles": ["kindness"],
+            "provenance": {"stated_self": {"source": "user"}, "principles": {"source": "user"}},
+        },
+        emotional_baseline={
+            "known_triggers": ["as the user put it"],
+            "provenance": {"known_triggers": {"source": "user"}},
+        },
+        anchors=["identity.stated_self", "identity.principles", "baseline.known_triggers"],
+    )
+    ops = [
+        {"op": "set_identity", "text": "model rewrite", "evidence": ["e1"]},
+        {"op": "add_principle", "text": "ruthlessness", "evidence": ["e1"]},
+        {"op": "add_baseline_item", "field": "known_triggers", "text": "model trigger", "evidence": ["e1"]},
+    ]
+    updated, report = operations.apply_operations(base, ops, known_entry_ids={"e1"})
+    assert report.rejected == 3
+    assert updated.identity["stated_self"] == "as the user put it"
+    assert updated.identity["principles"] == ["kindness"]
+    assert updated.emotional_baseline["known_triggers"] == ["as the user put it"]
+
+
+def test_derive_typical_mood_matches_hand_computed_average():
+    points = [
+        {"entry_id": "e1", "mood": 2},
+        {"entry_id": "e2", "mood": -1},
+        {"entry_id": "e3", "mood": 3},
+        {"entry_id": "e4", "mood": None},     # skipped — no substitution for a gap
+    ]
+    value, evidence = operations.derive_typical_mood(points)
+    assert value == round((2 - 1 + 3) / 3)     # code counts; == 1
+    assert evidence == ["e1", "e2", "e3"]       # only entries that carried a mood
+
+
+def test_derive_typical_mood_none_when_no_moods():
+    assert operations.derive_typical_mood([{"entry_id": "e1", "mood": None}]) == (None, [])
+
+
+def test_rebuild_derives_identity_and_baseline_from_l1_not_seed(vault_env):
+    from memory import db, profile, rebuild_profile
+
+    # A demo profile whose identity + baseline are pure seed values, no anchors —
+    # the rebuild must replace them with evidence-backed L1 claims.
+    profile.save_profile(Profile(
+        identity={"stated_self": "seed self", "principles": ["seed value"]},
+        emotional_baseline={
+            "typical_mood": -5, "known_triggers": ["seed trigger"], "what_helps": ["seed help"],
+        },
+    ))
+
+    moods = {"e1": 2, "e2": 4, "e3": 3}
+    for i in (1, 2, 3):
+        _seed_l1_entry(db, f"e{i}", date=f"2026-07-0{i}",
+                       summary=f"Reflecting on discipline, day {i}.",
+                       themes=["discipline"], mood=moods[f"e{i}"])
+
+    caller = make_caller(
+        '[{"op":"set_identity","text":"someone building discipline","evidence":["e1","e2"]},'
+        '{"op":"add_principle","text":"discipline","evidence":["e3"]},'
+        '{"op":"add_baseline_item","field":"what_helps","text":"routine","evidence":["e2"]}]'
+    )
+    report = asyncio.run(rebuild_profile.rebuild_profile(call_model=caller, today="2026-07-05"))
+
+    rebuilt = profile.get_profile()
+    # Seed values are gone; the model claims carry evidence into real L1 entries.
+    assert rebuilt.identity["stated_self"] == "someone building discipline"
+    assert rebuilt.identity["provenance"]["stated_self"]["evidence"] == ["e1", "e2"]
+    assert "discipline" in rebuilt.identity["principles"]
+    assert "seed value" not in rebuilt.identity["principles"]
+    assert rebuilt.emotional_baseline["what_helps"] == ["routine"]
+    assert "seed help" not in rebuilt.emotional_baseline["what_helps"]
+    # typical_mood is the hand-computed mean of the mood series, code-sourced.
+    assert rebuilt.emotional_baseline["typical_mood"] == round((2 + 4 + 3) / 3)
+    tm_prov = rebuilt.emotional_baseline["provenance"]["typical_mood"]
+    assert tm_prov["source"] == "code"
+    assert set(tm_prov["evidence"]) == {"e1", "e2", "e3"}
+    assert report.baseline_fields >= 1
+
+
+def test_update_seam_refreshes_typical_mood_from_full_history(vault_env):
+    from memory import db, operations, profile
+
+    # Three real entries with moods already in L1; the incremental seam is handed
+    # only the newest, but typical_mood must be the all-time mean over ALL of them,
+    # not just this batch (regression guard for the "stale until full rebuild" gap).
+    moods = {"e1": 1, "e2": 1, "e3": 5}
+    for i in (1, 2, 3):
+        _seed_l1_entry(db, f"e{i}", date=f"2026-07-0{i}",
+                       summary=f"Day {i}.", themes=["day"], mood=moods[f"e{i}"])
+
+    batch = [{"entry_id": "e3", "date": "2026-07-03", "summary": "Day 3.", "themes": ["day"]}]
+    saved, _ = asyncio.run(
+        operations.update_profile_from_entries(batch, call_model=make_caller("[]"), today="2026-07-05")
+    )
+
+    # round((1+1+5)/3) == 2 (full history), not 5 (batch-only) — proves the source.
+    assert saved.emotional_baseline["typical_mood"] == 2
+    tm = saved.emotional_baseline["provenance"]["typical_mood"]
+    assert tm["source"] == "code"
+    assert set(tm["evidence"]) == {"e1", "e2", "e3"}
+    assert profile.get_profile().emotional_baseline["typical_mood"] == 2   # persisted
+
+
+def test_update_seam_leaves_anchored_typical_mood_untouched(vault_env):
+    from memory import db, operations, profile
+
+    profile.save_profile(Profile(
+        emotional_baseline={"typical_mood": -3, "provenance": {"typical_mood": {"source": "user"}}},
+        anchors=["baseline.typical_mood"],
+    ))
+    _seed_l1_entry(db, "e1", date="2026-07-01", summary="Day.", themes=["day"], mood=5)
+
+    saved, _ = asyncio.run(
+        operations.update_profile_from_entries(
+            [{"entry_id": "e1", "date": "2026-07-01", "summary": "Day.", "themes": ["day"]}],
+            call_model=make_caller("[]"), today="2026-07-05",
+        )
+    )
+    assert saved.emotional_baseline["typical_mood"] == -3   # user anchor survives
+
+
+def test_rebuild_preserves_user_anchored_identity_field(vault_env):
+    from memory import db, profile, rebuild_profile
+
+    profile.save_profile(Profile(
+        identity={
+            "stated_self": "exactly how I see myself",
+            "principles": [],
+            "provenance": {"stated_self": {"source": "user"}},
+        },
+        anchors=["identity.stated_self"],
+    ))
+
+    _seed_l1_entry(db, "e1", date="2026-07-01", summary="A day.", themes=["day"], mood=1)
+    caller = make_caller('[{"op":"set_identity","text":"model rewrite","evidence":["e1"]}]')
+    asyncio.run(rebuild_profile.rebuild_profile(call_model=caller, today="2026-07-05"))
+
+    rebuilt = profile.get_profile()
+    assert rebuilt.identity["stated_self"] == "exactly how I see myself"
+    assert "identity.stated_self" in rebuilt.anchors

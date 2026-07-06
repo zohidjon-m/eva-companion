@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -67,6 +67,9 @@ STALE_DAYS = 60
 
 GOAL_STATUSES = {"active", "paused", "achieved", "abandoned"}
 PATTERN_TYPES = {"behavior", "cognitive", "emotional"}  # matches profile_operation.md
+# The two emotional_baseline list fields the model may append to (R7.5). It may
+# NOT touch ``typical_mood`` — that is code-derived (:func:`derive_typical_mood`).
+BASELINE_ITEM_FIELDS = {"known_triggers", "what_helps"}
 
 # Required fields per operation (§7.3). ``set_anchor`` is user-only and never
 # emitted by the engine, so it is not appliable here.
@@ -80,6 +83,10 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "mark_resolved": ("loop_id", "evidence"),
     "update_loop": ("loop_id", "note", "evidence"),
     "add_relationship_note": ("name", "note", "evidence"),
+    # R7.5 — evidence-backed identity & emotional baseline (singleton §7.2 dicts).
+    "set_identity": ("text", "evidence"),
+    "add_principle": ("text", "evidence"),
+    "add_baseline_item": ("field", "text", "evidence"),
 }
 
 # Every model operation must cite at least one real entry (the R7 realignment rule:
@@ -106,6 +113,9 @@ class AppliedReport:
     updated_loops: int = 0
     contradictions: int = 0
     relationship_notes: int = 0
+    identity_set: int = 0
+    principles_added: int = 0
+    baseline_items_added: int = 0
     rejected: int = 0
     reasons: list = field(default_factory=list)
 
@@ -191,6 +201,11 @@ def apply_operations(
     watch_list = [dict(w) for w in profile.watch_list]
     anchors = list(profile.anchors)
 
+    # Deep-copy the field-keyed provenance dicts so stamping identity/baseline here
+    # can't mutate the base profile in place (§7.2 v2; apply_operations stays pure).
+    identity["provenance"] = _copy_provenance(identity.get("provenance"))
+    baseline["provenance"] = _copy_provenance(baseline.get("provenance"))
+
     def _cited(op: dict) -> list[str]:
         ev = op.get("evidence")
         return [e for e in ev if e in known_entry_ids] if isinstance(ev, list) else []
@@ -256,6 +271,13 @@ def apply_operations(
                 report._reject(f"weaken: claim {op['claim_id']!r} is a user anchor")
             else:
                 claim["confidence"] = _clamp(_conf(claim) - WEAKEN_DELTA)
+                # Record the contradicting entry as *counter*-evidence (kept separate
+                # from supporting `evidence` so a rebuild never mistakes it for
+                # support) plus the reason. This keeps the weaken durably grounded, so
+                # the edit self-heal path (capture._flag_claims_for_revalidation) can
+                # re-audit this claim if that entry is later edited.
+                claim["counter_evidence"] = _merge_evidence(claim, _cited(op), key="counter_evidence")
+                claim["weaken_reason"] = str(op["reason"]).strip()
                 if claim["confidence"] < REVIEW_THRESHOLD:
                     claim["needs_review"] = True
                 report.weakened += 1
@@ -330,6 +352,49 @@ def apply_operations(
                 rel["evidence"] = _merge_evidence(rel, _cited(op))
                 rel["last_seen"] = today
                 report.relationship_notes += 1
+
+        elif verb == "set_identity":
+            # Scalar field: a new stated_self replaces the old (each carries its own
+            # evidence). Anchored (user-corrected) identity is never overwritten.
+            if profile_mod.is_field_anchored(profile, "identity.stated_self"):
+                report._reject("set_identity: stated_self is a user anchor")
+            else:
+                identity["stated_self"] = str(op["text"]).strip()
+                _stamp_provenance(identity, "stated_self", _cited(op), today)
+                report.identity_set += 1
+
+        elif verb == "add_principle":
+            if profile_mod.is_field_anchored(profile, "identity.principles"):
+                report._reject("add_principle: principles is a user anchor")
+            else:
+                text = str(op["text"]).strip()
+                principles = list(identity.get("principles") or [])
+                if any(text.lower() == str(p).strip().lower() for p in principles):
+                    report._reject(f"add_principle: {text!r} already recorded")
+                else:
+                    principles.append(text)
+                    identity["principles"] = principles
+                    _stamp_provenance(identity, "principles", _cited(op), today, merge=True)
+                    report.principles_added += 1
+
+        elif verb == "add_baseline_item":
+            fieldname = str(op["field"]).strip()
+            if fieldname not in BASELINE_ITEM_FIELDS:
+                # typical_mood is code-owned; only the two list fields are appliable.
+                report._reject(f"add_baseline_item: invalid field {op['field']!r}")
+                continue
+            if profile_mod.is_field_anchored(profile, f"baseline.{fieldname}"):
+                report._reject(f"add_baseline_item: {fieldname} is a user anchor")
+            else:
+                text = str(op["text"]).strip()
+                items = list(baseline.get(fieldname) or [])
+                if any(text.lower() == str(i).strip().lower() for i in items):
+                    report._reject(f"add_baseline_item: {text!r} already in {fieldname}")
+                else:
+                    items.append(text)
+                    baseline[fieldname] = items
+                    _stamp_provenance(baseline, fieldname, _cited(op), today, merge=True)
+                    report.baseline_items_added += 1
 
     updated = Profile(
         schema_version=profile.schema_version,
@@ -510,12 +575,14 @@ async def update_profile_from_entries(
     call_model: ModelCaller | None = None,
     today: str | None = None,
 ) -> tuple[Profile, AppliedReport]:
-    """Generate → validate → apply → decay → persist. The seam R8's scheduler calls.
+    """Generate → validate → apply → decay → refresh mood → persist. The seam R8 calls.
 
     Reads the current profile (bootstrapping an empty one if none exists yet, so a
     young profile grows from zero), asks the model for operations over ``entries``,
-    applies the surviving ones, runs nightly decay, and saves through
-    :func:`profile.save_profile`. Returns the saved profile and the apply report.
+    applies the surviving ones, runs nightly decay, refreshes the code-derived
+    ``typical_mood`` from the *full* L1 mood history (so it doesn't go stale between
+    full rebuilds), and saves through :func:`profile.save_profile`. Returns the saved
+    profile and the apply report.
     """
     today = today or today_str()
     base = profile_mod.get_profile() or Profile()
@@ -523,6 +590,7 @@ async def update_profile_from_entries(
     known = {str(e.get("entry_id")) for e in entries if e.get("entry_id")}
     applied, report = apply_operations(base, ops, known_entry_ids=known, today=today)
     decayed = apply_decay(applied, today=today)
+    decayed = apply_typical_mood(decayed, _load_mood_history())
     profile_mod.save_profile(decayed)
     log.info(
         "profile update: +%d added, %d strengthened, %d weakened, %d rejected",
@@ -531,7 +599,114 @@ async def update_profile_from_entries(
     return decayed, report
 
 
+# ── typical_mood: code-derived, never model-authored (R7.5) ───────────────────
+def derive_typical_mood(
+    mood_points: list[dict], *, evidence_cap: int = 20
+) -> tuple[int | None, list[str]]:
+    """The code-owned ``emotional_baseline.typical_mood``: rounded all-time mean.
+
+    The model may never compute this (EVA_MEMORY_ARCHITECTURE §7.2/§7.3, R7.5); code
+    counts. ``mood_points`` are entry records carrying ``mood`` (int or ``None`` when
+    extraction failed) and ``entry_id`` — sourced from ``extractions.mood``, the
+    canonical mood column that the ``mood_series`` chart table is itself a
+    denormalised copy of, so the L3 baseline and the mood chart never drift.
+    Averages every non-null mood, rounds to the −5…+5 scale, and returns that plus
+    the contributing entry uids (the most-recent ``evidence_cap`` kept, so the
+    provenance array stays bounded). Returns ``(None, [])`` when no entry carries a
+    mood — the baseline then simply has no typical_mood, mirroring the chart skipping
+    null points rather than substituting 0.
+    """
+    valued = [
+        (str(p.get("entry_id")), p.get("mood"))
+        for p in mood_points
+        if isinstance(p.get("mood"), int) and not isinstance(p.get("mood"), bool)
+        and p.get("entry_id")
+    ]
+    if not valued:
+        return None, []
+    mean = sum(m for _, m in valued) / len(valued)
+    rounded = int(max(-5, min(5, round(mean))))
+    return rounded, [eid for eid, _ in valued][-evidence_cap:]
+
+
+def apply_typical_mood(profile: Profile, mood_points: list[dict]) -> Profile:
+    """Write the code-derived ``typical_mood`` into a profile's baseline (R7.5).
+
+    The single place both write paths refresh typical_mood, so it never goes stale
+    between rebuilds: the full rebuild (:mod:`memory.rebuild_profile`) and the
+    incremental update seam (:func:`update_profile_from_entries`) both call this.
+    ``mood_points`` must be the *full* mood history (typical_mood is an all-time
+    mean, §7.2). A user-anchored typical_mood is left exactly as the user set it.
+    Pure — returns a new :class:`Profile`.
+    """
+    if profile_mod.is_field_anchored(profile, "baseline.typical_mood"):
+        return profile
+    mood_val, mood_ev = derive_typical_mood(mood_points)
+    baseline = dict(profile.emotional_baseline)
+    prov = dict(baseline.get("provenance") or {})
+    if mood_val is None:
+        baseline.pop("typical_mood", None)
+        prov.pop("typical_mood", None)
+    else:
+        baseline["typical_mood"] = mood_val
+        prov["typical_mood"] = {"source": "code", "evidence": mood_ev}
+    baseline["provenance"] = prov
+    return replace(profile, emotional_baseline=baseline)
+
+
+def _load_mood_history() -> list[dict]:
+    """The full real mood history from L1 (``extractions.mood``) — the mood source.
+
+    Lazily imported (like :func:`_llama_server_call`) so :mod:`memory.operations`
+    keeps a thin import surface. Returns ``[]`` if the store can't be read, so a
+    profile update never fails just because mood history is unavailable.
+    """
+    try:
+        from . import db
+
+        conn = db.get_or_create_db()
+        try:
+            return db.mood_history(conn)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — a missing/unreadable store must not block updates
+        log.warning("could not load mood history for typical_mood: %s", e)
+        return []
+
+
 # ── small helpers ─────────────────────────────────────────────────────────────
+def _copy_provenance(prov) -> dict:
+    """A deep-enough copy of a field-keyed provenance dict (§7.2 v2)."""
+    if not isinstance(prov, dict):
+        return {}
+    return {k: dict(v) if isinstance(v, dict) else v for k, v in prov.items()}
+
+
+def _stamp_provenance(
+    section: dict, field: str, cited: list[str], today: str, *, merge: bool = False
+) -> None:
+    """Write/refresh a singleton field's provenance entry (§7.2 v2, ``source=model``).
+
+    ``merge`` unions the cited evidence with any existing (for list fields that
+    append — principles, triggers, what_helps); otherwise the cited evidence
+    replaces it (for the scalar ``stated_self``). ``last_seen`` is stamped to today.
+    """
+    prov = section.setdefault("provenance", {})
+    entry = dict(prov.get(field)) if isinstance(prov.get(field), dict) else {}
+    if merge:
+        existing = entry.get("evidence")
+        base = list(existing) if isinstance(existing, list) else []
+        for eid in cited:
+            if eid not in base:
+                base.append(eid)
+        entry["evidence"] = base
+    else:
+        entry["evidence"] = list(cited)
+    entry["source"] = "model"
+    entry["last_seen"] = today
+    prov[field] = entry
+
+
 def _conf(claim: dict) -> float:
     try:
         return float(claim.get("confidence", NEW_CLAIM_CONFIDENCE))
@@ -544,9 +719,9 @@ def _clamp(value: float) -> float:
     return round(max(CONFIDENCE_FLOOR, min(CONFIDENCE_CAP, value)), 4)
 
 
-def _merge_evidence(claim: dict, new_ids: list[str]) -> list[str]:
-    """Union existing + new evidence uids, order-preserving, de-duplicated."""
-    existing = claim.get("evidence")
+def _merge_evidence(claim: dict, new_ids: list[str], *, key: str = "evidence") -> list[str]:
+    """Union existing + new uids under ``key``, order-preserving, de-duplicated."""
+    existing = claim.get(key)
     out = list(existing) if isinstance(existing, list) else []
     for eid in new_ids:
         if eid not in out:
@@ -580,8 +755,19 @@ def _compact_profile(profile: Profile) -> dict:
             for c in items if c.get("id")
         ]
 
+    baseline = profile.emotional_baseline
     return {
-        "identity": profile.identity.get("stated_self", ""),
+        # Surface identity + baseline list fields so the model can see what's already
+        # recorded and avoid restating it (R7.5). typical_mood is code-owned and
+        # deliberately omitted — the model must not reason about or emit it.
+        "identity": {
+            "stated_self": profile.identity.get("stated_self", ""),
+            "principles": list(profile.identity.get("principles") or []),
+        },
+        "emotional_baseline": {
+            "known_triggers": list(baseline.get("known_triggers") or []),
+            "what_helps": list(baseline.get("what_helps") or []),
+        },
         "goals": _claims(profile.goals, "text"),
         "patterns": _claims(profile.patterns, "text"),
         "open_loops": [

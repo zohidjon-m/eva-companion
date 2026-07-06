@@ -364,6 +364,12 @@ Checks:
 
 ### R7.5 - Evidence-Backed Identity And Emotional Baseline
 
+Status: implemented. Identity/baseline now carry field-keyed `provenance`
+(`schema_version` 2); the engine authors them via `set_identity` / `add_principle`
+/ `add_baseline_item` under the evidence gate; `typical_mood` is code-derived from
+L1 mood history; fields anchor by synthetic path (`identity.stated_self`, …) and
+survive rebuild.
+
 Goal: make the L3 `identity` and `emotional_baseline` sections real, closing the
 last demo seam R7 left in place.
 
@@ -408,7 +414,9 @@ Checks:
 
 - Identity and baseline in a rebuilt profile carry evidence pointers into L1, not
   seed values.
-- `typical_mood` matches a hand-computed average over the mood series.
+- `typical_mood` matches a hand-computed average over the L1 extraction moods
+  (`extractions.mood`, the canonical column `mood_series` is copied from), and is
+  refreshed on both the full rebuild and the incremental update seam — never stale.
 - A user-corrected identity/baseline field is anchored and cannot be overwritten
   by the model.
 - No identity/baseline field is written without valid evidence.

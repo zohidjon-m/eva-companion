@@ -836,8 +836,9 @@ def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
     The input to the live graph build (:func:`memory.graph.store_graph`) and the R7
     L3 rebuild (:func:`memory.rebuild_profile`): each row carries the entry
-    id/date/text plus the extraction's themes/emotions/entities, so both are derived
-    from the same data the mood chart shows. Ordered by ``date`` then ``created_at``
+    id/date/text plus the extraction's mood/themes/emotions/entities, so both are
+    derived from the same data the mood chart shows. ``mood`` (int or NULL) feeds the
+    R7.5 code-derived ``typical_mood``. Ordered by ``date`` then ``created_at``
     then ``rowid`` so same-day entries replay in a **stable** order — the L3 rebuild
     carries the profile forward across batches, so an unstable order would make the
     rebuilt profile non-deterministic.
@@ -848,6 +849,7 @@ def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             e.id        AS entry_id,
             e.date      AS date,
             e.text      AS text,
+            x.mood      AS mood,
             x.themes    AS themes,
             x.emotions  AS emotions,
             x.entities  AS entities,
@@ -858,6 +860,27 @@ def real_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY e.date ASC, e.created_at ASC, e.rowid ASC
         """
     ).fetchall()
+
+
+def mood_history(conn: sqlite3.Connection) -> list[dict]:
+    """Every real (non-seeded) done mood, oldest first — the source for typical_mood.
+
+    Reads ``extractions.mood`` directly: that column is the canonical mood value
+    (``mood_series`` is only a denormalised copy of it for fast chart queries), so
+    the R7.5 code-derived ``emotional_baseline.typical_mood`` and the mood chart draw
+    from one source and cannot drift. A lightweight projection (id + mood only) so the
+    incremental update seam can recompute the all-time mean cheaply on every run.
+    """
+    rows = conn.execute(
+        """
+        SELECT e.id AS entry_id, x.mood AS mood
+        FROM entries e
+        JOIN extractions x ON x.entry_id = e.id
+        WHERE e.is_seeded = 0 AND x.extraction_status = 'done'
+        ORDER BY e.date ASC, e.created_at ASC, e.rowid ASC
+        """
+    ).fetchall()
+    return [{"entry_id": r["entry_id"], "mood": r["mood"]} for r in rows]
 
 
 def recent_episodes(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
