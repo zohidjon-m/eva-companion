@@ -47,7 +47,11 @@ CREATE TABLE IF NOT EXISTS extractions (
     self_judgments      TEXT,              -- JSON: [string]   — regrets, self-criticism signals
     -- Summary for ChromaDB embedding (embedded at the same time extraction runs)
     summary             TEXT,             -- 4-5 sentences; NULL until status = done
-    extracted_at        TEXT              -- ISO-8601; NULL until status = done
+    extracted_at        TEXT,             -- ISO-8601; NULL until status = done
+    -- R8: 1 once this entry's `done` extraction has been folded into L3 by a
+    -- consolidation run, so each entry contributes to the profile exactly once —
+    -- regardless of when its (possibly late) extraction finished (v5).
+    consolidated        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_extractions_entry_id ON extractions(entry_id);

@@ -35,7 +35,7 @@ EXPECTED_COLUMNS = {
         "id", "entry_id", "extraction_status", "source_hash", "mood",
         "emotions", "entities", "themes", "events", "stated_goals",
         "behaviors", "decisions", "open_loops", "self_judgments", "summary",
-        "extracted_at",
+        "extracted_at", "consolidated",
     ],
     "mood_series": ["id", "entry_id", "date", "mood", "emotions", "is_seeded"],
     "graph_nodes": ["id", "label", "type", "entry_count", "entries", "is_seeded"],
@@ -76,7 +76,7 @@ def test_columns_exact(db, table, cols):
 def test_user_version_stamped(db):
     db_mod, conn = db
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == db_mod.SCHEMA_USER_VERSION == 4
+    assert version == db_mod.SCHEMA_USER_VERSION == 5
 
 
 def test_entries_type_check_constraint(db):
@@ -199,6 +199,40 @@ def test_v3_to_v4_migration_adds_source_hash_and_unique_entry_index(db):
         if r["unique"]
     }
     assert "idx_extractions_entry_id" in indexes
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db_mod.SCHEMA_USER_VERSION
+
+
+def test_v4_to_v5_migration_adds_consolidated_flag(db):
+    """A v4 db (extractions without `consolidated`) migrates forward cleanly.
+
+    Rebuilds the table at the v4 shape (rather than DROP COLUMN, which SQLite
+    re-parses from the commented DDL) and resets the version, then re-runs init_db.
+    """
+    db_mod, conn = db
+    conn.executescript(
+        """
+        ALTER TABLE extractions RENAME TO extractions_old;
+        CREATE TABLE extractions (
+            id TEXT PRIMARY KEY,
+            entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+            extraction_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(extraction_status IN ('pending','done','failed','null_stored')),
+            source_hash TEXT,
+            mood INTEGER, emotions TEXT, entities TEXT, themes TEXT, events TEXT,
+            stated_goals TEXT, behaviors TEXT, decisions TEXT, open_loops TEXT,
+            self_judgments TEXT, summary TEXT, extracted_at TEXT
+        );
+        DROP TABLE extractions_old;
+        PRAGMA user_version = 4;
+        """
+    )
+    conn.commit()
+    assert "consolidated" not in {r["name"] for r in conn.execute("PRAGMA table_info(extractions)")}
+
+    db_mod.init_db(conn)  # runs the v4 → v5 migration
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(extractions)")}
+    assert "consolidated" in cols
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db_mod.SCHEMA_USER_VERSION
 
 

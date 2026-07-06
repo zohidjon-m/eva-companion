@@ -93,6 +93,34 @@ def test_weaken_records_counter_evidence_and_reason_without_polluting_support():
     assert g["weaken_reason"] == "skipped all week"
 
 
+def test_add_goal_dedupes_against_existing_text_as_a_strengthen():
+    # A model slip re-adding an existing goal (within a batch, or across the
+    # overlapping nightly/weekly passes) must fold into it, not duplicate it.
+    base = Profile(goals=[_goal("g1", "Train at the gym", conf=0.5, evidence=["e1"])])
+    ops = [{"op": "add_goal", "text": "train at the GYM", "evidence": ["e2"]}]  # same, cased
+    updated, report = operations.apply_operations(
+        base, ops, known_entry_ids={"e1", "e2"}, today="2026-07-05"
+    )
+    assert len(updated.goals) == 1                       # no duplicate
+    assert updated.goals[0]["confidence"] == pytest.approx(0.6)  # strengthened
+    assert updated.goals[0]["evidence"] == ["e1", "e2"]
+    assert report.added == 0 and report.strengthened == 1
+
+
+def test_add_pattern_dedupes_and_never_overwrites_an_anchor():
+    anchored = _goal("p1", "Skips workouts when stressed", conf=0.9, source="user")
+    anchored["type"] = "behavior"
+    base = Profile(patterns=[anchored], anchors=["p1"])
+    ops = [{"op": "add_pattern", "text": "skips workouts when stressed",
+            "type": "behavior", "evidence": ["e1"]}]
+    updated, report = operations.apply_operations(
+        base, ops, known_entry_ids={"e1"}, today="2026-07-05"
+    )
+    assert len(updated.patterns) == 1
+    assert updated.patterns[0]["confidence"] == 0.9      # anchor untouched
+    assert report.added == 0 and report.strengthened == 0 and report.rejected == 1
+
+
 def test_add_pattern_rejects_type_outside_the_enum():
     base = Profile()
     ops = [
