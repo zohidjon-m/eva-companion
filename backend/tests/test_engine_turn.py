@@ -23,11 +23,20 @@ def _intent(monkeypatch, label, method="rule"):
     monkeypatch.setattr(intent_classifier, "classify", fake_classify)
 
 
-def _stub_context(monkeypatch, *, memories=(), episodes=(), passages=(), slices=""):
+def _stub_context(monkeypatch, *, memories=(), episodes=(), passages=(), slices=()):
     monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: list(memories))
     monkeypatch.setattr(retrieval, "recent_episodes", lambda *a, **k: list(episodes))
     monkeypatch.setattr(retrieval, "retrieve_corpus", lambda *a, **k: list(passages))
-    monkeypatch.setattr(profile, "slices_for_prompt", lambda topic: slices)
+    if isinstance(slices, str):
+        slice_items = [
+            profile.ProfileSlice(
+                id="test-slice", kind="goal", text=slices, prompt_text=slices,
+                evidence_ids=["e1"], source="model", confidence=0.8, status="active",
+            )
+        ] if slices else []
+    else:
+        slice_items = list(slices)
+    monkeypatch.setattr(profile, "retrieve_slices", lambda *a, **k: list(slice_items))
 
 
 # ── classify ─────────────────────────────────────────────────────────────────
@@ -78,6 +87,24 @@ def test_ask_info_intent_retrieves_corpus(monkeypatch):
     assert state.passages == [passage]
     assert state.citations == [passage.as_citation()]
     assert "p" in state.corpus_context
+
+
+def test_ask_advice_passes_advice_mode_to_profile_retrieval(monkeypatch):
+    calls = []
+
+    def spy_profile(topic, *, advice_mode=False):
+        calls.append(advice_mode)
+        return []
+
+    _intent(monkeypatch, intent_classifier.ASK_ADVICE)
+    _stub_context(monkeypatch)
+    monkeypatch.setattr(profile, "retrieve_slices", spy_profile)
+
+    state = engine.TurnState(text="should I skip the gym?")
+    asyncio.run(engine.classify(state))
+    asyncio.run(engine.assemble_context(state))
+
+    assert calls == [True]
 
 
 def test_recent_episodes_dedup_against_recall(monkeypatch):
@@ -175,8 +202,12 @@ def test_meta_frame_shape(monkeypatch):
     ep = retrieval.RecentEpisode(
         entry_id="e2", date="2026-06-02", summary="s2", mood=0, themes=[],
     )
+    prof_slice = profile.ProfileSlice(
+        id="g1", kind="goal", text="Train", prompt_text="A goal of theirs: Train.",
+        evidence_ids=["e3"], source="model", confidence=0.8, status="active",
+    )
     _intent(monkeypatch, intent_classifier.ASK_INFO)
-    _stub_context(monkeypatch, memories=[mem], episodes=[ep], passages=[p])
+    _stub_context(monkeypatch, memories=[mem], episodes=[ep], passages=[p], slices=[prof_slice])
 
     state = engine.TurnState(text="what does the book say?", mode="mentor")
     asyncio.run(engine.classify(state))
@@ -186,4 +217,4 @@ def test_meta_frame_shape(monkeypatch):
     assert meta["type"] == "meta"
     assert meta["intent"] == intent_classifier.ASK_INFO
     assert meta["persona"] == "mentor"
-    assert meta["retrieved"] == {"corpus": 1, "memory": 1, "episodes": 1}
+    assert meta["retrieved"] == {"corpus": 1, "memory": 1, "episodes": 1, "profile": 1}

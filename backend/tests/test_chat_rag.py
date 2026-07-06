@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app import app
 from intent import classifier as intent_classifier
 from llm import client as llm_client
-from memory import capture, conversations, retrieval
+from memory import capture, conversations, profile, retrieval
 from support import stub_chat_provider_ready
 
 
@@ -67,6 +67,7 @@ def _setup(monkeypatch, recorder, *, passages):
     # episodes in test_engine_turn.py.
     monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [])
     monkeypatch.setattr(retrieval, "recent_episodes", lambda *a, **k: [])
+    monkeypatch.setattr(profile, "retrieve_slices", lambda *a, **k: [])
 
 
 def _drain(ws):
@@ -213,7 +214,7 @@ def test_meta_frame_carries_intent_and_persona(monkeypatch):
     assert meta["intent"] == intent_classifier.VENT
     assert meta["method"] == "rule"
     assert meta["persona"] == "coach"
-    assert meta["retrieved"] == {"corpus": 0, "memory": 0, "episodes": 0}
+    assert meta["retrieved"] == {"corpus": 0, "memory": 0, "episodes": 0, "profile": 0}
 
 
 # ── memory recall wiring at the socket boundary ──────────────────────────────

@@ -15,6 +15,7 @@ All pointed at a temp vault.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,8 +124,50 @@ def prof(tmp_path, monkeypatch):
 @pytest.fixture()
 def seeded(prof):
     """A temp vault pre-seeded with the demo profile."""
+    _seed_evidence_entries(DEMO_PROFILE)
     prof.save_profile(prof.Profile.from_dict(DEMO_PROFILE))
     return prof
+
+
+def _collect_evidence_ids(value) -> set[str]:
+    """Collect every evidence uid from a nested profile fixture."""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        evidence = value.get("evidence")
+        if isinstance(evidence, list):
+            found.update(str(e) for e in evidence)
+        for child in value.values():
+            found.update(_collect_evidence_ids(child))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_collect_evidence_ids(item))
+    return found
+
+
+def _seed_evidence_entries(raw_profile: dict) -> None:
+    """Insert real non-seeded entries for the profile fixture evidence ids."""
+    from memory import db
+
+    start = datetime(2026, 6, 1, 8, 0, 0)
+    conn = db.get_or_create_db()
+    try:
+        for i, entry_id in enumerate(sorted(_collect_evidence_ids(raw_profile))):
+            when = start + timedelta(days=i)
+            text = (
+                f"Evidence {entry_id}: gym discipline prayer exercise Daniel "
+                "work stress communication fatigue conflict routine."
+            )
+            db.insert_entry(
+                conn,
+                id=entry_id,
+                date=when.date().isoformat(),
+                type="journal",
+                text=text,
+                word_count=len(text.split()),
+                created_at=when.isoformat(),
+            )
+    finally:
+        conn.close()
 
 
 # ── §7.2 schema conformance ──────────────────────────────────────────────────
@@ -186,12 +229,9 @@ def test_gym_question_surfaces_the_fitness_goal_unprompted(seeded):
     assert any("tension" in s.lower() for s in slices)
 
 
-def test_core_identity_and_values_always_present(seeded):
+def test_unknown_topic_does_not_surface_profile_facts(seeded):
     slices = seeded.get_slices("just thinking out loud about nothing in particular")
-    blob = " ".join(slices).lower()
-    assert "muslim man" in blob  # stated_self
-    assert "discipline" in blob  # a principle
-    assert "goal of theirs" in blob  # active goals are core
+    assert slices == []
 
 
 def test_off_topic_message_does_not_surface_a_specific_relationship(seeded):
@@ -207,6 +247,63 @@ def test_format_slices_drops_empty(seeded):
     assert seeded.format_slices([]) == ""
     out = seeded.format_slices(["A.", "B."])
     assert out == "- A.\n- B."
+
+
+def test_retrieve_slices_returns_typed_evidence_backed_claims(seeded):
+    slices = seeded.retrieve_slices("should I skip the gym today?", advice_mode=True)
+    assert slices
+    gym = next(s for s in slices if s.kind == "goal" and "gym" in s.text.lower())
+    assert gym.evidence_ids
+    assert gym.source == "model"
+    assert gym.confidence == pytest.approx(0.71)
+
+
+def test_profile_evidence_resolution_reuses_one_db_connection(seeded, monkeypatch):
+    calls = 0
+    real_get_or_create_db = seeded.db.get_or_create_db
+
+    def counted_get_or_create_db(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_get_or_create_db(*args, **kwargs)
+
+    monkeypatch.setattr(seeded.db, "get_or_create_db", counted_get_or_create_db)
+
+    slices = seeded.retrieve_slices("gym discipline Daniel routine", advice_mode=True)
+    assert slices
+    assert calls == 1
+
+    calls = 0
+    sections = seeded.profile_sections()
+    assert sections
+    assert calls == 1
+
+
+def test_model_claim_with_missing_evidence_is_not_prompt_injected(prof):
+    broken = dict(DEMO_PROFILE)
+    broken["goals"] = [
+        {
+            "id": "g-missing",
+            "text": "Train at the gym",
+            "status": "active",
+            "confidence": 0.9,
+            "evidence": ["missing-entry"],
+            "source": "model",
+        }
+    ]
+    broken["identity"] = {"provenance": {}}
+    broken["patterns"] = []
+    broken["relationships"] = []
+    broken["emotional_baseline"] = {"provenance": {}}
+    broken["open_loops"] = []
+    broken["watch_list"] = []
+    prof.save_profile(prof.Profile.from_dict(broken))
+
+    assert prof.retrieve_slices("gym") == []
+    sections = prof.profile_sections()
+    claim = sections[0]["claims"][0]
+    assert claim["evidence_status"] == "missing"
+    assert claim["evidence"][0]["available"] is False
 
 
 # ── profile.md ↔ profile.json sync (§7.2) ─────────────────────────────────────
@@ -367,13 +464,24 @@ def test_get_profile_absent_then_present(prof):
     client = TestClient(app)
     r = client.get("/profile")
     assert r.status_code == 200
-    assert r.json() == {"present": False, "markdown": None}
+    assert r.json() == {"present": False, "markdown": None, "sections": []}
 
     prof.save_profile(prof.Profile.from_dict(DEMO_PROFILE))
     r = client.get("/profile")
     body = r.json()
     assert body["present"] is True
     assert "## Your goals" in body["markdown"]
+    assert any(s["id"] == "goals" for s in body["sections"])
+
+
+def test_profile_evidence_endpoint_returns_full_local_entry(seeded):
+    client = TestClient(app)
+    r = client.get("/profile/evidence/seed-entry-0008")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == "seed-entry-0008"
+    assert body["type"] == "journal"
+    assert "Evidence seed-entry-0008" in body["text"]
 
 
 def test_put_profile_applies_edit(seeded):
@@ -384,6 +492,7 @@ def test_put_profile_applies_edit(seeded):
     body = r.json()
     assert body["present"] is True
     assert body["warnings"] == []
+    assert body["sections"]
     assert seeded.get_profile().identity["principles"] == ["honesty"]
 
 

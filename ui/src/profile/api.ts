@@ -10,12 +10,56 @@
 
 const BASE = "http://127.0.0.1:8000";
 
+/** Preview row for one entry that backs a profile claim. */
+export type ProfileEvidenceRef = {
+  id: string;
+  date: string | null;
+  type: string | null;
+  created_at: string | null;
+  preview: string;
+  available: boolean;
+};
+
+/** One structured claim from profile.json, with its evidence pointers. */
+export type ProfileClaim = {
+  id: string;
+  kind: string;
+  text: string;
+  source: string;
+  confidence: number | null;
+  status: string | null;
+  anchored: boolean;
+  evidence_status: "available" | "partial" | "missing" | "none" | "user" | string;
+  evidence_ids: string[];
+  evidence: ProfileEvidenceRef[];
+};
+
+/** A rendered profile section with audit metadata for its claims. */
+export type ProfileSection = {
+  id: string;
+  title: string;
+  claims: ProfileClaim[];
+};
+
+/** Full local entry text for an expanded evidence row. */
+export type ProfileEvidenceDetail = {
+  id: string;
+  date: string;
+  type: string;
+  created_at: string;
+  text: string;
+  has_revisions: boolean;
+  original_text: string | null;
+};
+
 /** The profile as the screen sees it: a Markdown rendering, or absent. */
 export type ProfileDoc = {
   /** False for a fresh vault or a deleted profile.json — the empty state. */
   present: boolean;
   /** The profile.md text to render; null when `present` is false. */
   markdown: string | null;
+  /** Structured claims grouped by section, used to show evidence pointers. */
+  sections: ProfileSection[];
 };
 
 /** The result of saving an edit: the re-rendered doc plus lenient-parse warnings. */
@@ -43,4 +87,11 @@ export async function saveProfile(markdown: string): Promise<ProfileSaveResult> 
   });
   if (!resp.ok) throw new Error(`PUT /profile -> ${resp.status}`);
   return (await resp.json()) as ProfileSaveResult;
+}
+
+/** Fetch the exact local entry behind a profile evidence pointer. */
+export async function fetchProfileEvidence(uid: string): Promise<ProfileEvidenceDetail> {
+  const resp = await fetch(`${BASE}/profile/evidence/${encodeURIComponent(uid)}`);
+  if (!resp.ok) throw new Error(`GET /profile/evidence -> ${resp.status}`);
+  return (await resp.json()) as ProfileEvidenceDetail;
 }

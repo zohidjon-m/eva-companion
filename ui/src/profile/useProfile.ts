@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchProfile, saveProfile } from "./api";
+import { fetchProfile, saveProfile, type ProfileSection } from "./api";
 
 /**
  * useProfile — load the profile rendering and apply edits, kept here so the
@@ -19,6 +19,8 @@ export type UseProfile = {
   present: boolean;
   /** The rendered profile.md (view mode). */
   markdown: string;
+  /** Structured claims grouped by section, for evidence inspection. */
+  sections: ProfileSection[];
   /** Whether the editor is open. */
   editing: boolean;
   /** The editable draft Markdown. */
@@ -39,6 +41,7 @@ export function useProfile(): UseProfile {
   const [error, setError] = useState<string | null>(null);
   const [present, setPresent] = useState(false);
   const [markdown, setMarkdown] = useState("");
+  const [sections, setSections] = useState<ProfileSection[]>([]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -52,6 +55,7 @@ export function useProfile(): UseProfile {
         if (!alive) return;
         setPresent(r.present);
         setMarkdown(r.markdown ?? "");
+        setSections(r.sections ?? []);
       })
       .catch(() => alive && setError("Couldn't load your profile. Is the backend running?"))
       .finally(() => alive && setLoading(false));
@@ -78,6 +82,7 @@ export function useProfile(): UseProfile {
     try {
       const r = await saveProfile(draft);
       setMarkdown(r.markdown ?? "");
+      setSections(r.sections ?? []);
       setWarnings(r.warnings);
       setSavedTick((t) => t + 1);
       // Stay in view mode after a clean save; if there were warnings, the screen
@@ -95,6 +100,7 @@ export function useProfile(): UseProfile {
     error,
     present,
     markdown,
+    sections,
     editing,
     draft,
     setDraft,

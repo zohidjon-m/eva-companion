@@ -75,7 +75,7 @@ export type TurnMeta = {
   /** The persona/mode this turn ran as: friend | coach | mentor. */
   persona: string;
   /** Counts of what reached the context window this turn. */
-  retrieved: { corpus: number; memory: number; episodes: number };
+  retrieved: { corpus: number; memory: number; episodes: number; profile: number };
 };
 
 export type Message = {
@@ -96,7 +96,7 @@ export type Message = {
 
 type ServerFrame =
   | { type: "start" }
-  | { type: "meta"; intent: string | null; method: string | null; persona: string; retrieved: { corpus: number; memory: number; episodes: number } }
+  | { type: "meta"; intent: string | null; method: string | null; persona: string; retrieved: { corpus: number; memory: number; episodes: number; profile: number } }
   | { type: "citations"; citations: Citation[] }
   | { type: "memory"; memories: Memory[] }
   | { type: "token"; content: string }

@@ -1,6 +1,13 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Button, EmptyState, Icon } from "../components";
 import { ProfileArt } from "../sections/illustrations";
+import {
+  fetchProfileEvidence,
+  type ProfileClaim,
+  type ProfileEvidenceDetail,
+  type ProfileEvidenceRef,
+  type ProfileSection,
+} from "./api";
 import { useProfile } from "./useProfile";
 
 /**
@@ -70,7 +77,7 @@ export function ProfileScreen() {
       {p.warnings.length > 0 && <Warnings warnings={p.warnings} />}
 
       <article className="profile__doc">
-        <Markdown source={p.markdown} />
+        <Markdown source={p.markdown} sections={p.sections} />
       </article>
     </div>
   );
@@ -140,11 +147,19 @@ function Warnings({ warnings }: { warnings: string[] }) {
  * general Markdown engine. Kept here, dependency-free, because Eva ships offline.
  */
 
-function Markdown({ source }: { source: string }) {
+function Markdown({ source, sections }: { source: string; sections: ProfileSection[] }) {
   const blocks: ReactNode[] = [];
   const lines = source.split("\n");
+  const claims = useMemo(() => sections.flatMap((section) => section.claims), [sections]);
+  const shown = new Set<string>();
   let i = 0;
   let key = 0;
+
+  const evidenceFor = (line: string) => {
+    const matches = claimsForLine(line, claims).filter((claim) => !shown.has(claim.id));
+    matches.forEach((claim) => shown.add(claim.id));
+    return matches;
+  };
 
   while (i < lines.length) {
     const line = lines[i];
@@ -175,24 +190,148 @@ function Markdown({ source }: { source: string }) {
       }
       blocks.push(
         <ul key={key++} className="profile__list">
-          {items.map((it, k) => (
-            <li key={k}>{inline(it)}</li>
-          ))}
+          {items.map((it, k) => {
+            const matched = evidenceFor(it);
+            return (
+              <li key={k}>
+                <span>{inline(it)}</span>
+                {matched.map((claim) => (
+                  <ClaimEvidence key={claim.id} claim={claim} />
+                ))}
+              </li>
+            );
+          })}
         </ul>,
       );
       continue;
     }
 
     // Otherwise a paragraph (a single line; backend separates paragraphs by blanks).
+    const matched = evidenceFor(line);
     blocks.push(
-      <p key={key++} className="profile__p">
-        {inline(line.trim())}
-      </p>,
+      <div key={key++} className="profile__p-wrap">
+        <p className="profile__p">{inline(line.trim())}</p>
+        {matched.map((claim) => (
+          <ClaimEvidence key={claim.id} claim={claim} />
+        ))}
+      </div>,
     );
     i++;
   }
 
   return <>{blocks}</>;
+}
+
+function ClaimEvidence({ claim }: { claim: ProfileClaim }) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, ProfileEvidenceDetail | "error">>({});
+  const refs = claim.evidence;
+
+  const open = async (ref: ProfileEvidenceRef) => {
+    if (!ref.available) return;
+    if (openId === ref.id) {
+      setOpenId(null);
+      return;
+    }
+    setOpenId(ref.id);
+    if (details[ref.id]) return;
+    setLoadingId(ref.id);
+    try {
+      const detail = await fetchProfileEvidence(ref.id);
+      setDetails((prev) => ({ ...prev, [ref.id]: detail }));
+    } catch {
+      setDetails((prev) => ({ ...prev, [ref.id]: "error" }));
+    } finally {
+      setLoadingId(null);
+    }
+  };
+
+  return (
+    <div className="profile-evidence">
+      <div className="profile-evidence__head">
+        <Icon name="shield-check" size={13} />
+        <span>{claimStatus(claim)}</span>
+      </div>
+      {refs.length > 0 ? (
+        <div className="profile-evidence__refs">
+          {refs.map((ref) => {
+            const detail = details[ref.id];
+            const isOpen = openId === ref.id;
+            return (
+              <div key={ref.id} className="profile-evidence__item">
+                <button
+                  type="button"
+                  className="profile-evidence__ref"
+                  onClick={() => void open(ref)}
+                  disabled={!ref.available}
+                  aria-expanded={isOpen}
+                  title={ref.available ? "Show entry" : "Evidence entry unavailable"}
+                >
+                  <span className="profile-evidence__date">
+                    {ref.date ?? "Missing entry"}
+                  </span>
+                  <span className="profile-evidence__preview">
+                    {ref.available ? ref.preview : "This evidence pointer no longer resolves."}
+                  </span>
+                </button>
+                {isOpen && (
+                  <div className="profile-evidence__detail">
+                    {loadingId === ref.id ? (
+                      <p>Loading evidence...</p>
+                    ) : detail === "error" ? (
+                      <p>Could not load this entry.</p>
+                    ) : detail ? (
+                      <>
+                        <p className="profile-evidence__meta">
+                          {detail.date} / {detail.type}
+                        </p>
+                        <p>{detail.text}</p>
+                      </>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="profile-evidence__empty">{claimStatus(claim)}</p>
+      )}
+    </div>
+  );
+}
+
+function claimStatus(claim: ProfileClaim): string {
+  if (claim.anchored || claim.source === "user") return "User corrected";
+  if (claim.evidence_status === "available") return `${claim.evidence.length} evidence entries`;
+  if (claim.evidence_status === "partial") return "Some evidence available";
+  if (claim.evidence_status === "missing") return "Evidence missing";
+  if (claim.evidence_status === "none") return "No evidence attached yet";
+  return "Evidence";
+}
+
+function claimsForLine(line: string, claims: ProfileClaim[]): ProfileClaim[] {
+  const normalizedLine = normalizeClaimText(line);
+  if (!normalizedLine) return [];
+  return claims.filter((claim) => {
+    const normalizedClaim = normalizeClaimText(claim.text);
+    return (
+      normalizedClaim.length > 0 &&
+      (normalizedLine.includes(normalizedClaim) || normalizedClaim.includes(normalizedLine))
+    );
+  });
+}
+
+function normalizeClaimText(text: string): string {
+  return text
+    .replace(/\*\*/g, "")
+    .replace(/_/g, "")
+    .replace(/[—–]/g, "-")
+    .toLowerCase()
+    .replace(/[^a-z0-9+\-\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** Inline formatting: **bold** and _italic_. Splits on the markers, in order. */

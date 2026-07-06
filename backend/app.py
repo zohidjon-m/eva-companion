@@ -60,9 +60,9 @@ import scheduler as consolidation_scheduler
 from memory import graph as graph_l4
 from memory import growth as growth_l4
 
-# Phase 13 L3 profile (the seam): what Eva understands about the user. Read into
-# the {profile_slices} chat slot every turn; the Profile screen reads/edits it via
-# GET/PUT /profile (profile.md ↔ profile.json sync). # DEMO-STUB until the L3 engine.
+# Phase R9 L3 profile read/audit path: what Eva understands about the user.
+# Chat consumes evidence-backed slices, and the Profile screen reads/edits the
+# Markdown source while auditing claims through GET/PUT /profile.
 from memory import profile
 
 # R6 conversation engine: the read-loop state machine (classify → assemble_context
@@ -1145,8 +1145,8 @@ async def acknowledge_journal(body: AcknowledgeIn) -> dict:
 # them. GET returns the human-readable profile.md rendering (the structured truth
 # lives in profile.json); PUT saves an edited rendering, running the lenient
 # profile.md → profile.json sync (§7.2) that turns edits into user-anchored
-# corrections. Both go through the L3 seam (memory.profile); the real engine will
-# write profile.json without changing these endpoints. # DEMO-STUB.
+# corrections. R9 also returns structured claims and evidence pointers so the
+# user can audit what each profile claim rests on.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1158,8 +1158,7 @@ def get_profile_md() -> dict:
     a fresh vault, or a deleted ``profile.json`` — so the screen shows its
     "Eva is still getting to know you" empty state instead of erroring.
     """
-    markdown = profile.read_markdown()
-    return {"present": markdown is not None, "markdown": markdown}
+    return profile.profile_payload()
 
 
 class ProfilePut(BaseModel):
@@ -1182,7 +1181,21 @@ def put_profile_md(body: ProfilePut) -> dict:
         markdown, warnings = profile.save_markdown(body.markdown)
     except profile.NoProfileError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"present": True, "markdown": markdown, "warnings": warnings}
+    return profile.profile_payload(markdown=markdown, warnings=warnings)
+
+
+@app.get("/profile/evidence/{uid}")
+def get_profile_evidence(uid: str) -> dict:
+    """Return the full local entry behind one profile evidence pointer.
+
+    The profile screen uses this to let the user audit a claim against the exact
+    chat/journal entry that supports it. Missing pointers are a 404 rather than a
+    fabricated payload.
+    """
+    detail = profile.evidence_detail(uid)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="evidence entry not found")
+    return detail
 
 
 # ─────────────────────────────────────────────────────────────────────────────

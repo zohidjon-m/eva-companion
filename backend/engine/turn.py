@@ -52,6 +52,7 @@ class TurnState:
     episodes: list[retrieval.RecentEpisode] = field(default_factory=list)
     memories: list[retrieval.Memory] = field(default_factory=list)
     passages: list[retrieval.Passage] = field(default_factory=list)
+    profile_slice_items: list[profile.ProfileSlice] = field(default_factory=list)
     episodes_context: str = ""
     memory_context: str = ""
     profile_slices: str = ""
@@ -83,6 +84,7 @@ class TurnState:
                 "corpus": len(self.citations),
                 "memory": len(self.memories),
                 "episodes": len(self.episodes),
+                "profile": len(self.profile_slice_items),
             },
         }
 
@@ -119,12 +121,15 @@ async def assemble_context(state: TurnState) -> TurnState:
     by what reaches the window, not by the prompt.
     """
     recall_task = asyncio.create_task(asyncio.to_thread(retrieval.recall_memories, state.text))
-    profile_task = asyncio.create_task(asyncio.to_thread(profile.slices_for_prompt, state.text))
     episodes_task = asyncio.create_task(asyncio.to_thread(retrieval.recent_episodes))
 
     retrieves = bool(state.intent and state.intent.retrieves)
     label = state.intent.label if state.intent else "?"
     method = state.intent.method if state.intent else "?"
+    advice_mode = label == intent_classifier.ASK_ADVICE
+    profile_task = asyncio.create_task(
+        asyncio.to_thread(profile.retrieve_slices, state.text, advice_mode=advice_mode)
+    )
     if retrieves:
         state.passages = await asyncio.to_thread(retrieval.retrieve_corpus, state.text)
         state.corpus_context = retrieval.format_corpus_context(state.passages)
@@ -151,9 +156,10 @@ async def assemble_context(state: TurnState) -> TurnState:
     state.episodes = [e for e in await episodes_task if e.entry_id not in recalled_ids]
     state.episodes_context = retrieval.format_episodes_context(state.episodes)
 
-    state.profile_slices = await profile_task
-    if state.profile_slices:
-        log.info("profile → %d slice(s) in context", state.profile_slices.count("\n") + 1)
+    state.profile_slice_items = await profile_task
+    state.profile_slices = profile.format_slices(state.profile_slice_items)
+    if state.profile_slice_items:
+        log.info("profile → %d slice(s) in context", len(state.profile_slice_items))
     return state
 
 

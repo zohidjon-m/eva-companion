@@ -25,15 +25,17 @@ def ctx(tmp_path, monkeypatch):
     import memory.vault as vault_mod
     import memory.db as db_mod
     import memory.conversations as conv_mod
+    import memory.profile as profile_mod
 
     importlib.reload(memory)
     importlib.reload(vault_mod)
     importlib.reload(db_mod)
     importlib.reload(conv_mod)
+    importlib.reload(profile_mod)
 
     from app import app
     from llm import client as llm_client
-    from memory import capture, retrieval
+    from memory import capture, profile, retrieval
     from support import stub_chat_provider_ready
 
     async def fake_stream(messages, **kwargs):
@@ -54,6 +56,8 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "capture_entry", fake_capture)
     monkeypatch.setattr(capture, "run_extraction_and_embed", fake_extract)
     monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [])
+    monkeypatch.setattr(retrieval, "recent_episodes", lambda *a, **k: [])
+    monkeypatch.setattr(profile, "retrieve_slices", lambda *a, **k: [])
 
     return TestClient(app), conv_mod
 

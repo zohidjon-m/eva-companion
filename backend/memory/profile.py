@@ -1,14 +1,11 @@
-"""L3 profile — what Eva understands about *you* (Phase 13).
+"""L3 profile — what Eva understands about *you*.
 
-# DEMO-STUB: replaced by L3 engine
+# R9: evidence-backed L3 read/audit interface
 # ─────────────────────────────────────────────────────────────────────────────
-# This module is the SEAM the real L3 update engine plugs into later. For the
-# demo it reads a hand-written ``profile.json`` + ``profile.md`` from the vault;
-# the real engine will WRITE that same ``profile.json`` (via the §7.3 operation
-# grammar) without changing this read interface at all. Everything a caller can
-# do here — :func:`get_profile`, :func:`get_slices`, the ``profile.md`` ↔
-# ``profile.json`` sync — is the contract the live engine must satisfy. Swapping
-# the stub for the engine is a drop-in, not a rewrite.
+# This module is the read/audit contract for Eva's L3 profile. The consolidation
+# loop writes ``profile.json`` using the §7.3 operation grammar; chat reads small
+# evidence-backed slices from it, and the Profile screen shows the same claims
+# with local evidence previews. ``profile.md`` remains the editable human view.
 #
 # The hard rule that makes that possible: ``profile.json`` conforms EXACTLY to
 # EVA_MEMORY_ARCHITECTURE §7.2 — same fields, same types, same structure. The
@@ -18,7 +15,7 @@
 #
 # Two stores, one source of truth (§7.2):
 #   * ``profile.json`` is the structured truth. :func:`get_profile` reads it;
-#     :func:`get_slices` selects from it for the chat prompt.
+#     :func:`retrieve_slices` selects evidence-backed claims for the chat prompt.
 #   * ``profile.md`` is a human-readable *rendering* of the JSON, regenerated
 #     after every write. When the user edits and saves the Markdown, the lenient
 #     parser turns their edits into ``set_anchor`` corrections applied back to the
@@ -41,7 +38,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import vault_dir
+from . import db, vault, vault_dir
 
 log = logging.getLogger("eva.memory.profile")
 
@@ -70,6 +67,23 @@ MOOD_MIN, MOOD_MAX = -5, 5
 # Writes regenerate both files; serialize them so two concurrent PUT /profile
 # saves can't interleave a read and a write (FastAPI may use threads).
 _write_lock = threading.Lock()
+
+# R9 read-side gates. Prompt slices are intentionally small and evidence-backed:
+# the model gets only a few relevant L3 facts, never the whole profile.
+MIN_PROMPT_CONFIDENCE = 0.2
+MAX_PROMPT_SLICES = 6
+EVIDENCE_PREVIEW_CHARS = 180
+
+_SLICE_PRIORITY = {
+    "goal": 0,
+    "value": 1,
+    "identity": 2,
+    "pattern": 3,
+    "watch": 4,
+    "open_loop": 5,
+    "relationship": 6,
+    "baseline": 7,
+}
 
 
 def _profile_json_path() -> Path:
@@ -167,6 +181,67 @@ class Profile:
         }
 
 
+@dataclass(frozen=True)
+class ProfileEvidenceRef:
+    """A preview of one L0 entry that backs an L3 profile claim.
+
+    R9 uses this as the audit payload for the Profile screen. ``available`` is
+    false when the evidence pointer no longer resolves to a real, non-seeded
+    entry; those pointers stay visible for audit but are never used for prompt
+    injection.
+    """
+
+    id: str
+    date: str | None = None
+    type: str | None = None
+    created_at: str | None = None
+    preview: str = ""
+    available: bool = False
+
+    def to_dict(self) -> dict:
+        """Return the JSON shape sent by ``GET /profile``."""
+        return {
+            "id": self.id,
+            "date": self.date,
+            "type": self.type,
+            "created_at": self.created_at,
+            "preview": self.preview,
+            "available": self.available,
+        }
+
+
+@dataclass(frozen=True)
+class ProfileSlice:
+    """One evidence-backed L3 fact selected for a chat turn.
+
+    ``text`` is the human claim text; ``prompt_text`` is the short second-person
+    line handed to the model. Keeping both lets the UI/debug path show the claim
+    plainly while the prompt stays in Eva's established voice.
+    """
+
+    id: str
+    kind: str
+    text: str
+    prompt_text: str
+    evidence_ids: list[str] = field(default_factory=list)
+    source: str = "model"
+    confidence: float | None = None
+    status: str | None = None
+
+    def to_dict(self) -> dict:
+        """Return a compact JSON/debug representation of this prompt slice."""
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "text": self.text,
+            "prompt_text": self.prompt_text,
+            "evidence_ids": self.evidence_ids,
+            "source": self.source,
+            "confidence": self.confidence,
+            "status": self.status,
+        }
+
+
 def _ensure_provenance(section: dict) -> None:
     """Ensure ``section["provenance"]`` is a field-keyed dict (§7.2 v2 shape).
 
@@ -249,7 +324,7 @@ def get_profile() -> Profile | None:
 # job, not the stub's.
 _STOPWORDS = frozenset(
     """
-    a an and are as at be but by do does for from had has have how i if in is it
+    a about an and are as at be but by do does for from had has have how i if in is it
     its me my of on or our should so that the their them then they this to was we
     what when which who why will with you your
     """.split()
@@ -266,111 +341,416 @@ def _topic_tokens(text: str) -> set[str]:
 def _is_relevant(claim_text: str, topic_tokens: set[str]) -> bool:
     """Whether a claim shares a content word with the current message.
 
-    A deliberately simple lexical overlap — enough to surface a topic-specific
-    pattern/loop without the always-included core (goals, identity, baseline).
+    R9 deliberately uses a small lexical overlap for all prompt candidates,
+    including identity, goals, and baseline facts. It prevents whole-profile
+    injection while keeping the eventual semantic retrieval seam narrow.
     """
     if not topic_tokens:
         return False
     return bool(_topic_tokens(claim_text) & topic_tokens)
 
 
-def get_slices(topic: str) -> list[str]:
-    """Return the profile fragments relevant to ``topic``, as prompt-ready lines.
+def _preview(text: str, limit: int = EVIDENCE_PREVIEW_CHARS) -> str:
+    """Return a compact one-line preview for evidence rows."""
+    cleaned = " ".join((text or "").split())
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1].rstrip() + "..."
 
-    The selection policy (a stub for the engine's future semantic retrieval):
 
-      * **Core, always included** — who the user says they are, the principles
-        they hold, their active goals, and their emotional baseline. These define
-        "who you are" and are cheap; Eva should carry them every turn so a reply
-        like "should I skip the gym?" can reference a stated fitness goal
-        *unprompted* (Phase 13 test).
-      * **Contextual, topic-matched** — patterns, relationships, open loops, and
-        watch-list contradictions are only included when they share a content
-        word with the current message, so they surface when relevant and stay out
-        of the way otherwise.
+def _unique_ids(ids: list | tuple | None) -> list[str]:
+    """Return stable, unique string ids from an evidence list."""
+    out: list[str] = []
+    for raw in ids or []:
+        value = str(raw).strip()
+        if value and value not in out:
+            out.append(value)
+    return out
 
-    Returns ``[]`` when there is no profile (graceful degrade) or nothing applies.
-    The returned strings are short, second-person fragments; :func:`format_slices`
-    (or :func:`slices_for_prompt`) renders them into the ``{profile_slices}`` slot.
+
+def _row_ref(entry_id: str, row) -> ProfileEvidenceRef:
+    """Build an evidence ref from an ``entries`` SQLite row."""
+    if row is None:
+        return ProfileEvidenceRef(id=entry_id, available=False)
+    if int(row["is_seeded"] or 0):
+        return ProfileEvidenceRef(
+            id=entry_id,
+            date=row["date"],
+            type=row["type"],
+            created_at=row["created_at"],
+            preview="",
+            available=False,
+        )
+    return ProfileEvidenceRef(
+        id=entry_id,
+        date=row["date"],
+        type=row["type"],
+        created_at=row["created_at"],
+        preview=_preview(row["text"]),
+        available=True,
+    )
+
+
+def _vault_ref(entry_id: str) -> ProfileEvidenceRef:
+    """Build an evidence ref by scanning L0 Markdown when SQLite has no row."""
+    turn = vault.find_entry(entry_id)
+    if turn is None:
+        return ProfileEvidenceRef(id=entry_id, available=False)
+    return ProfileEvidenceRef(
+        id=entry_id,
+        date=turn.date,
+        type=turn.type,
+        created_at=turn.created_at,
+        preview=_preview(turn.text),
+        available=True,
+    )
+
+
+def _evidence_refs(evidence_ids: list[str], conn=None) -> list[ProfileEvidenceRef]:
+    """Resolve evidence ids to preview refs, marking missing/seeded rows unavailable."""
+    ids = _unique_ids(evidence_ids)
+    if not ids:
+        return []
+
+    own_conn = conn is None
+    if own_conn:
+        conn = db.get_or_create_db()
+    refs: list[ProfileEvidenceRef] = []
+    try:
+        for entry_id in ids:
+            row = db.get_entry(conn, entry_id)
+            refs.append(_row_ref(entry_id, row) if row is not None else _vault_ref(entry_id))
+    finally:
+        if own_conn:
+            conn.close()
+    return refs
+
+
+def _valid_evidence_ids(evidence_ids: list[str], conn=None) -> list[str]:
+    """Return evidence ids that resolve to real, non-seeded L0/L1 entries."""
+    return [ref.id for ref in _evidence_refs(evidence_ids, conn) if ref.available]
+
+
+def _field_provenance(section: dict, field: str) -> dict:
+    """Return the provenance entry for a singleton profile field."""
+    prov = section.get("provenance") if isinstance(section, dict) else None
+    entry = prov.get(field) if isinstance(prov, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def _field_source(profile: Profile, section: str, field: str) -> str:
+    """Return ``user`` for anchored singleton fields, otherwise provenance source."""
+    path = field_anchor_path(section, field)
+    if is_field_anchored(profile, path):
+        return "user"
+    holder = profile.identity if section == "identity" else profile.emotional_baseline
+    return str(_field_provenance(holder, field).get("source") or "model")
+
+
+def _field_evidence(section: dict, field: str) -> list[str]:
+    """Return the evidence ids attached to a singleton field."""
+    return _unique_ids(_field_provenance(section, field).get("evidence"))
+
+
+def _claim_confidence(claim: dict) -> float | None:
+    """Return a claim confidence as float, or ``None`` if absent/unparseable."""
+    value = claim.get("confidence")
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _source(claim: dict) -> str:
+    """Return the claim source, defaulting absent old claims to model-owned."""
+    return str(claim.get("source") or "model")
+
+
+def _claim_is_promptable(
+    *,
+    source: str,
+    evidence_ids: list[str],
+    conn,
+    confidence: float | None = None,
+    stale: bool = False,
+    needs_review: bool = False,
+) -> tuple[bool, list[str]]:
+    """Apply the R9 anti-hallucination gates for prompt slices."""
+    if stale or needs_review:
+        return False, []
+    if source != "user" and confidence is not None and confidence < MIN_PROMPT_CONFIDENCE:
+        return False, []
+    valid = _valid_evidence_ids(evidence_ids, conn)
+    return source == "user" or bool(valid), valid
+
+
+def _append_slice(
+    slices: list[ProfileSlice],
+    conn,
+    *,
+    id: str,
+    kind: str,
+    text: str,
+    prompt_text: str,
+    evidence_ids: list[str],
+    source: str,
+    confidence: float | None = None,
+    status: str | None = None,
+    stale: bool = False,
+    needs_review: bool = False,
+) -> None:
+    """Append one prompt slice if it passes evidence and quality gates."""
+    clean_text = text.strip()
+    if not clean_text:
+        return
+    ok, valid_ids = _claim_is_promptable(
+        source=source,
+        evidence_ids=evidence_ids,
+        conn=conn,
+        confidence=confidence,
+        stale=stale,
+        needs_review=needs_review,
+    )
+    if not ok:
+        return
+    slices.append(
+        ProfileSlice(
+            id=id,
+            kind=kind,
+            text=clean_text,
+            prompt_text=prompt_text.strip(),
+            evidence_ids=valid_ids if source != "user" else _unique_ids(evidence_ids),
+            source=source,
+            confidence=confidence,
+            status=status,
+        )
+    )
+
+
+def _rank_slices(slices: list[ProfileSlice]) -> list[ProfileSlice]:
+    """Rank and cap prompt slices using R9's small-context policy."""
+    return sorted(
+        slices,
+        key=lambda s: (
+            _SLICE_PRIORITY.get(s.kind, 99),
+            -(s.confidence if s.confidence is not None else 0.0),
+            -len(s.evidence_ids),
+            s.id,
+        ),
+    )[:MAX_PROMPT_SLICES]
+
+
+def retrieve_slices(topic: str, *, advice_mode: bool = False) -> list[ProfileSlice]:
+    """Return typed, evidence-backed L3 slices relevant to one chat topic.
+
+    R9 replaces the old whole-profile prompt seam with a small retrieval step:
+    only claims sharing content words with ``topic`` are candidates, model-owned
+    claims must cite at least one real non-seeded entry, and low-confidence/stale
+    review items stay out of the prompt. ``advice_mode`` gives relevant goals and
+    values first rank so advice can be tailored without injecting unrelated facts.
     """
-    profile = get_profile()
-    if profile is None:
+    prof = get_profile()
+    if prof is None:
         return []
 
     tokens = _topic_tokens(topic or "")
-    fragments: list[str] = []
+    if not tokens:
+        return []
 
-    # ── Core: identity ──────────────────────────────────────────────────────
-    stated_self = str(profile.identity.get("stated_self") or "").strip()
-    if stated_self:
-        fragments.append(f"They describe themselves as: {stated_self}.")
-    principles = [str(p).strip() for p in profile.identity.get("principles", []) if str(p).strip()]
-    if principles:
-        fragments.append(f"Principles they hold to: {_join(principles)}.")
+    conn = db.get_or_create_db()
+    try:
+        slices: list[ProfileSlice] = []
 
-    # ── Core: active goals (the payoff the demo leans on) ──────────────────────
-    for goal in profile.goals:
-        text = str(goal.get("text") or "").strip()
-        if text and str(goal.get("status") or "active") == "active":
-            fragments.append(f"A goal of theirs: {text}.")
+        stated_self = str(prof.identity.get("stated_self") or "").strip()
+        if stated_self and _is_relevant(stated_self, tokens):
+            _append_slice(
+                slices,
+                conn,
+                id="identity.stated_self",
+                kind="identity",
+                text=stated_self,
+                prompt_text=f"They describe themselves as: {stated_self}.",
+                evidence_ids=_field_evidence(prof.identity, "stated_self"),
+                source=_field_source(prof, "identity", "stated_self"),
+            )
 
-    # ── Core: emotional baseline ───────────────────────────────────────────────
-    baseline = profile.emotional_baseline
-    helps = [str(h).strip() for h in baseline.get("what_helps", []) if str(h).strip()]
-    if helps:
-        fragments.append(f"What tends to help them: {_join(helps)}.")
-    triggers = [str(t).strip() for t in baseline.get("known_triggers", []) if str(t).strip()]
-    if triggers:
-        fragments.append(f"What tends to weigh on them: {_join(triggers)}.")
+        principles = [str(p).strip() for p in prof.identity.get("principles", []) if str(p).strip()]
+        principles_text = _join(principles) if principles else ""
+        if principles_text and _is_relevant(principles_text, tokens):
+            _append_slice(
+                slices,
+                conn,
+                id="identity.principles",
+                kind="value",
+                text=principles_text,
+                prompt_text=f"Principles they hold to: {principles_text}.",
+                evidence_ids=_field_evidence(prof.identity, "principles"),
+                source=_field_source(prof, "identity", "principles"),
+            )
 
-    # ── Contextual: only when the message touches them ─────────────────────────
-    for pattern in profile.patterns:
-        text = str(pattern.get("text") or "").strip()
-        if text and _is_relevant(text, tokens):
-            fragments.append(f"Something they've noticed about themselves: {text}.")
+        for goal in prof.goals:
+            text = str(goal.get("text") or "").strip()
+            status = str(goal.get("status") or "active")
+            if text and status == "active" and _is_relevant(text, tokens):
+                _append_slice(
+                    slices,
+                    conn,
+                    id=str(goal.get("id") or f"goal:{text.lower()}"),
+                    kind="goal",
+                    text=text,
+                    prompt_text=f"A goal of theirs: {text}.",
+                    evidence_ids=_unique_ids(goal.get("evidence")),
+                    source=_source(goal),
+                    confidence=_claim_confidence(goal),
+                    status=status,
+                    stale=bool(goal.get("stale")),
+                    needs_review=bool(goal.get("needs_review")),
+                )
 
-    for rel in profile.relationships:
-        name = str(rel.get("name") or "").strip()
-        summary = str(rel.get("summary") or "").strip()
-        blob = f"{name} {summary}".strip()
-        if name and _is_relevant(blob, tokens):
-            fragments.append(f"About {name} ({rel.get('type', 'someone')} of theirs): {summary}.")
+        baseline = prof.emotional_baseline
+        helps = [str(h).strip() for h in baseline.get("what_helps", []) if str(h).strip()]
+        helps_text = _join(helps) if helps else ""
+        if helps_text and _is_relevant(helps_text, tokens):
+            _append_slice(
+                slices,
+                conn,
+                id="baseline.what_helps",
+                kind="baseline",
+                text=helps_text,
+                prompt_text=f"What tends to help them: {helps_text}.",
+                evidence_ids=_field_evidence(baseline, "what_helps"),
+                source=_field_source(prof, "baseline", "what_helps"),
+            )
 
-    for loop in profile.open_loops:
-        desc = str(loop.get("description") or "").strip()
-        if desc and _is_relevant(desc, tokens):
-            fragments.append(f"An open loop on their mind: {desc}.")
+        triggers = [str(t).strip() for t in baseline.get("known_triggers", []) if str(t).strip()]
+        triggers_text = _join(triggers) if triggers else ""
+        if triggers_text and _is_relevant(triggers_text, tokens):
+            _append_slice(
+                slices,
+                conn,
+                id="baseline.known_triggers",
+                kind="baseline",
+                text=triggers_text,
+                prompt_text=f"What tends to weigh on them: {triggers_text}.",
+                evidence_ids=_field_evidence(baseline, "known_triggers"),
+                source=_field_source(prof, "baseline", "known_triggers"),
+            )
 
-    for item in profile.watch_list:
-        desc = str(item.get("description") or "").strip()
-        if desc and _is_relevant(desc, tokens):
-            fragments.append(f"A tension worth gently holding: {desc}.")
+        for pattern in prof.patterns:
+            text = str(pattern.get("text") or "").strip()
+            if text and _is_relevant(text, tokens):
+                _append_slice(
+                    slices,
+                    conn,
+                    id=str(pattern.get("id") or f"pattern:{text.lower()}"),
+                    kind="pattern",
+                    text=text,
+                    prompt_text=f"Something they've noticed about themselves: {text}.",
+                    evidence_ids=_unique_ids(pattern.get("evidence")),
+                    source=_source(pattern),
+                    confidence=_claim_confidence(pattern),
+                    status=str(pattern.get("type") or "") or None,
+                    stale=bool(pattern.get("stale")),
+                    needs_review=bool(pattern.get("needs_review")),
+                )
 
-    return fragments
+        for rel in prof.relationships:
+            name = str(rel.get("name") or "").strip()
+            summary = str(rel.get("summary") or "").strip()
+            blob = f"{name} {summary}".strip()
+            if name and _is_relevant(blob, tokens):
+                text = f"{name} - {summary}" if summary else name
+                _append_slice(
+                    slices,
+                    conn,
+                    id=f"relationship:{name.lower()}",
+                    kind="relationship",
+                    text=text,
+                    prompt_text=f"About {name} ({rel.get('type', 'someone')} of theirs): {summary}.",
+                    evidence_ids=_unique_ids(rel.get("evidence")),
+                    source=_source(rel),
+                    status=str(rel.get("type") or "") or None,
+                )
+
+        for loop in prof.open_loops:
+            desc = str(loop.get("description") or "").strip()
+            status = str(loop.get("status") or "open")
+            if desc and status != "resolved" and _is_relevant(desc, tokens):
+                _append_slice(
+                    slices,
+                    conn,
+                    id=str(loop.get("id") or f"loop:{desc.lower()}"),
+                    kind="open_loop",
+                    text=desc,
+                    prompt_text=f"An open loop on their mind: {desc}.",
+                    evidence_ids=_unique_ids(loop.get("evidence")),
+                    source=_source(loop),
+                    status=status,
+                    stale=bool(loop.get("stale")),
+                    needs_review=bool(loop.get("needs_review")),
+                )
+
+        for item in prof.watch_list:
+            desc = str(item.get("description") or "").strip()
+            if desc and _is_relevant(desc, tokens):
+                wid = f"watch:{item.get('pattern_id', '')}:{item.get('conflicting_goal_id', '')}"
+                _append_slice(
+                    slices,
+                    conn,
+                    id=wid,
+                    kind="watch",
+                    text=desc,
+                    prompt_text=f"A tension worth gently holding: {desc}.",
+                    evidence_ids=_unique_ids(item.get("evidence")),
+                    source=_source(item),
+                )
+
+        if advice_mode:
+            return sorted(
+                slices,
+                key=lambda s: (
+                    0 if s.kind in {"goal", "value"} else 1,
+                    _SLICE_PRIORITY.get(s.kind, 99),
+                    -(s.confidence if s.confidence is not None else 0.0),
+                    -len(s.evidence_ids),
+                    s.id,
+                ),
+            )[:MAX_PROMPT_SLICES]
+
+        return _rank_slices(slices)
+    finally:
+        conn.close()
 
 
-def format_slices(fragments: list[str]) -> str:
+def get_slices(topic: str) -> list[str]:
+    """Return prompt-ready profile fragments for legacy callers/tests.
+
+    New R9 code should call :func:`retrieve_slices` for typed slices. This wrapper
+    keeps older callers on the same evidence-backed selection rules as chat.
+    """
+    return [s.prompt_text for s in retrieve_slices(topic)]
+
+
+def format_slices(fragments: list[ProfileSlice] | list[str]) -> str:
     """Render profile fragments into the ``{profile_slices}`` prompt slot text.
 
     Each fragment becomes a bullet so the model reads them as discrete facts about
-    the person, not prose to quote back. Returns ``""`` for an empty list, which
-    the assembler drops — so a turn with no relevant profile carries no profile
-    block at all. The slot's header ("What you know about this person…") lives once
-    in :mod:`prompts.assembly`, beside the slot it governs.
+    the person, not prose to quote back. Returns ``""`` for an empty list.
     """
     if not fragments:
         return ""
-    return "\n".join(f"- {f}" for f in fragments)
+    lines = [f.prompt_text if isinstance(f, ProfileSlice) else str(f) for f in fragments]
+    return "\n".join(f"- {line}" for line in lines if line.strip())
 
 
-def slices_for_prompt(topic: str) -> str:
+def slices_for_prompt(topic: str, *, advice_mode: bool = False) -> str:
     """Convenience: the formatted ``{profile_slices}`` text for one chat turn.
 
-    The one call the chat handler makes — :func:`get_slices` then
-    :func:`format_slices` — kept here so the handler stays a one-liner and the
-    profile's prompt contribution is composed entirely inside this module.
+    Kept for compatibility with older call sites. It now delegates to
+    :func:`retrieve_slices`, so prompt text and typed audit metadata share the same
+    R9 evidence and relevance gates.
     """
-    return format_slices(get_slices(topic))
+    return format_slices(retrieve_slices(topic, advice_mode=advice_mode))
 
 
 def _join(items: list[str]) -> str:
@@ -498,6 +878,308 @@ def render_markdown(profile: Profile) -> str:
 #     …) and its provenance ``source`` becomes ``user`` (R7.5). Relationships still
 #     take the user's edit without an anchor (they carry neither id nor path).
 # ─────────────────────────────────────────────────────────────────────────────
+
+# R9 structured profile audit payloads.
+
+
+def _evidence_status(source: str, refs: list[ProfileEvidenceRef], evidence_ids: list[str]) -> str:
+    """Return a compact evidence state for one visible profile claim."""
+    if not evidence_ids:
+        return "user" if source == "user" else "none"
+    available = sum(1 for ref in refs if ref.available)
+    if available == len(evidence_ids):
+        return "available"
+    if available:
+        return "partial"
+    return "missing"
+
+
+def _claim_payload(
+    *,
+    id: str,
+    kind: str,
+    text: str,
+    source: str,
+    evidence_ids: list[str],
+    anchored: bool,
+    conn=None,
+    confidence: float | None = None,
+    status: str | None = None,
+) -> dict | None:
+    """Build the structured claim payload used by the Profile screen."""
+    clean = text.strip()
+    if not clean:
+        return None
+    refs = _evidence_refs(evidence_ids, conn)
+    return {
+        "id": id,
+        "kind": kind,
+        "text": clean,
+        "source": source,
+        "confidence": confidence,
+        "status": status,
+        "anchored": anchored,
+        "evidence_status": _evidence_status(source, refs, evidence_ids),
+        "evidence_ids": evidence_ids,
+        "evidence": [ref.to_dict() for ref in refs],
+    }
+
+
+def _claim_is_anchored(profile: Profile, claim: dict) -> bool:
+    """Return whether an id-bearing claim is protected by a user correction."""
+    return claim.get("source") == "user" or claim.get("id") in profile.anchors
+
+
+def _section(id: str, title: str, claims: list[dict | None]) -> dict | None:
+    """Return a section payload when it contains at least one visible claim."""
+    kept = [claim for claim in claims if claim is not None]
+    if not kept:
+        return None
+    return {"id": id, "title": title, "claims": kept}
+
+
+def profile_sections(profile: Profile | None = None) -> list[dict]:
+    """Return structured profile claims grouped for the audit UI.
+
+    This is the visible half of R9: every claim carries the evidence ids it rests
+    on, preview rows for the entries that still resolve, and an evidence status so
+    missing pointers remain auditable instead of silently disappearing.
+    """
+    prof = profile or get_profile()
+    if prof is None:
+        return []
+
+    conn = db.get_or_create_db()
+    try:
+        return _profile_sections_with_conn(prof, conn)
+    finally:
+        conn.close()
+
+
+def _profile_sections_with_conn(prof: Profile, conn) -> list[dict]:
+    """Build profile sections while reusing one SQLite connection."""
+    sections: list[dict] = []
+
+    def claim(**kwargs) -> dict | None:
+        return _claim_payload(conn=conn, **kwargs)
+
+    stated = str(prof.identity.get("stated_self") or "").strip()
+    principles = [str(p).strip() for p in prof.identity.get("principles", []) if str(p).strip()]
+    maybe = _section(
+        "identity",
+        _H_IDENTITY,
+        [
+            claim(
+                id="identity.stated_self",
+                kind="identity",
+                text=stated,
+                source=_field_source(prof, "identity", "stated_self"),
+                evidence_ids=_field_evidence(prof.identity, "stated_self"),
+                anchored=is_field_anchored(prof, "identity.stated_self"),
+            ),
+            claim(
+                id="identity.principles",
+                kind="value",
+                text=_join(principles) if principles else "",
+                source=_field_source(prof, "identity", "principles"),
+                evidence_ids=_field_evidence(prof.identity, "principles"),
+                anchored=is_field_anchored(prof, "identity.principles"),
+            ),
+        ],
+    )
+    if maybe:
+        sections.append(maybe)
+
+    maybe = _section(
+        "goals",
+        _H_GOALS,
+        [
+            claim(
+                id=str(g.get("id") or f"goal:{i}"),
+                kind="goal",
+                text=str(g.get("text") or ""),
+                source=_source(g),
+                confidence=_claim_confidence(g),
+                status=str(g.get("status") or "active"),
+                evidence_ids=_unique_ids(g.get("evidence")),
+                anchored=_claim_is_anchored(prof, g),
+            )
+            for i, g in enumerate(prof.goals)
+        ],
+    )
+    if maybe:
+        sections.append(maybe)
+
+    maybe = _section(
+        "patterns",
+        _H_PATTERNS,
+        [
+            claim(
+                id=str(p.get("id") or f"pattern:{i}"),
+                kind="pattern",
+                text=str(p.get("text") or ""),
+                source=_source(p),
+                confidence=_claim_confidence(p),
+                status=str(p.get("type") or "") or None,
+                evidence_ids=_unique_ids(p.get("evidence")),
+                anchored=_claim_is_anchored(prof, p),
+            )
+            for i, p in enumerate(prof.patterns)
+        ],
+    )
+    if maybe:
+        sections.append(maybe)
+
+    rel_claims = []
+    for rel in prof.relationships:
+        name = str(rel.get("name") or "").strip()
+        summary = str(rel.get("summary") or "").strip()
+        rel_claims.append(
+            claim(
+                id=f"relationship:{name.lower()}",
+                kind="relationship",
+                text=f"{name} - {summary}" if summary else name,
+                source=_source(rel),
+                status=str(rel.get("type") or "") or None,
+                evidence_ids=_unique_ids(rel.get("evidence")),
+                anchored=False,
+            )
+        )
+    maybe = _section("relationships", _H_RELATIONSHIPS, rel_claims)
+    if maybe:
+        sections.append(maybe)
+
+    baseline = prof.emotional_baseline
+    mood = baseline.get("typical_mood")
+    triggers = [str(t).strip() for t in baseline.get("known_triggers", []) if str(t).strip()]
+    helps = [str(h).strip() for h in baseline.get("what_helps", []) if str(h).strip()]
+    maybe = _section(
+        "baseline",
+        _H_BASELINE,
+        [
+            claim(
+                id="baseline.typical_mood",
+                kind="baseline",
+                text=f"Typical mood: {mood:+d}" if isinstance(mood, int) else "",
+                source=_field_source(prof, "baseline", "typical_mood"),
+                evidence_ids=_field_evidence(baseline, "typical_mood"),
+                anchored=is_field_anchored(prof, "baseline.typical_mood"),
+            ),
+            claim(
+                id="baseline.known_triggers",
+                kind="baseline",
+                text=_join(triggers) if triggers else "",
+                source=_field_source(prof, "baseline", "known_triggers"),
+                evidence_ids=_field_evidence(baseline, "known_triggers"),
+                anchored=is_field_anchored(prof, "baseline.known_triggers"),
+            ),
+            claim(
+                id="baseline.what_helps",
+                kind="baseline",
+                text=_join(helps) if helps else "",
+                source=_field_source(prof, "baseline", "what_helps"),
+                evidence_ids=_field_evidence(baseline, "what_helps"),
+                anchored=is_field_anchored(prof, "baseline.what_helps"),
+            ),
+        ],
+    )
+    if maybe:
+        sections.append(maybe)
+
+    maybe = _section(
+        "open_loops",
+        _H_LOOPS,
+        [
+            claim(
+                id=str(loop.get("id") or f"loop:{i}"),
+                kind="open_loop",
+                text=str(loop.get("description") or ""),
+                source=_source(loop),
+                status=str(loop.get("status") or "open"),
+                evidence_ids=_unique_ids(loop.get("evidence")),
+                anchored=_claim_is_anchored(prof, loop),
+            )
+            for i, loop in enumerate(prof.open_loops)
+        ],
+    )
+    if maybe:
+        sections.append(maybe)
+
+    maybe = _section(
+        "watch",
+        _H_WATCH,
+        [
+            claim(
+                id=f"watch:{w.get('pattern_id', '')}:{w.get('conflicting_goal_id', '')}",
+                kind="watch",
+                text=str(w.get("description") or ""),
+                source=_source(w),
+                evidence_ids=_unique_ids(w.get("evidence")),
+                anchored=False,
+            )
+            for w in prof.watch_list
+        ],
+    )
+    if maybe:
+        sections.append(maybe)
+
+    return sections
+
+
+def profile_payload(*, markdown: str | None = None, warnings: list[str] | None = None) -> dict:
+    """Return the ``GET/PUT /profile`` payload with Markdown plus audit sections."""
+    prof = get_profile()
+    if prof is None:
+        payload = {"present": False, "markdown": None, "sections": []}
+    else:
+        payload = {
+            "present": True,
+            "markdown": markdown if markdown is not None else read_markdown(),
+            "sections": profile_sections(prof),
+        }
+    if warnings is not None:
+        payload["warnings"] = warnings
+    return payload
+
+
+def evidence_detail(entry_id: str) -> dict | None:
+    """Return the full local entry text for a profile evidence pointer.
+
+    Resolves through SQLite first and falls back to scanning Markdown in L0. The
+    Profile screen uses this when the user expands an evidence row; no network or
+    model call is involved.
+    """
+    conn = db.get_or_create_db()
+    try:
+        row = db.get_entry(conn, entry_id)
+    finally:
+        conn.close()
+
+    original = vault.original_revision(entry_id)
+    if row is not None:
+        return {
+            "id": row["id"],
+            "date": row["date"],
+            "type": row["type"],
+            "created_at": row["created_at"],
+            "text": row["text"],
+            "has_revisions": original is not None,
+            "original_text": original.text if original is not None else None,
+        }
+
+    turn = vault.find_entry(entry_id)
+    if turn is None:
+        return None
+    return {
+        "id": turn.id,
+        "date": turn.date,
+        "type": turn.type,
+        "created_at": turn.created_at,
+        "text": turn.text,
+        "has_revisions": original is not None,
+        "original_text": original.text if original is not None else None,
+    }
+
 
 # A "## Heading" line.
 _HEADING_RE = re.compile(r"^##\s+(.*?)\s*$")

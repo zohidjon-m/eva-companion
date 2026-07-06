@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app import app
 from llm import client as llm_client
-from memory import capture, conversations, retrieval
+from memory import capture, conversations, profile, retrieval
 from prompts import assembly
 from support import stub_chat_provider_ready
 
@@ -55,6 +55,7 @@ def _setup(monkeypatch, recorder):
     # Recent-episode assembly (R6) also runs every turn and reads the DB; stub it
     # off so these persona/history tests see only the persona + history wiring.
     monkeypatch.setattr(retrieval, "recent_episodes", lambda *a, **k: [])
+    monkeypatch.setattr(profile, "retrieve_slices", lambda *a, **k: [])
 
 
 def _drain(ws):

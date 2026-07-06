@@ -19,7 +19,7 @@ import {
   fetchConversations,
   type ConversationSummary,
 } from "./api";
-import { useChat, type Citation, type Message } from "./useChat";
+import { useChat, type Citation, type Memory, type Message } from "./useChat";
 
 /**
  * ChatScreen — the Phase 4 chat surface, wired to `WS /chat` via useChat.
@@ -344,7 +344,7 @@ function Turn({ message }: { message: Message }) {
       )}
       <div className="turn__col">
         {isEva && <span className="turn__name">Eva</span>}
-        {isEva && memories && memories.length > 0 && <Memories />}
+        {isEva && memories && memories.length > 0 && <Memories memories={memories} />}
         <div
           className={["turn__body", failed ? "turn__body--failed" : ""]
             .filter(Boolean)
@@ -374,15 +374,21 @@ function Turn({ message }: { message: Message }) {
  * before she answers. It only ever renders when the backend actually sent recalled
  * memories for the turn, so the cue can never claim a recall that didn't happen.
  *
- * It deliberately shows no dates: which specific days Eva recalled is noise in the
- * chat flow, and re-reading lives in Journal browse — this is just the quiet
- * "she remembered" signal, not a doorway into the entries.
+ * R9 renders date labels from the memory frame so recall is visible without
+ * turning the chat flow into an entry browser.
  */
-function Memories() {
+function Memories({ memories }: { memories: Memory[] }) {
   return (
     <div className="remember">
       <Icon name="sparkle" size={13} className="remember__mark" />
       <span className="remember__label">Remembering</span>
+      <span className="remember__chips">
+        {memories.map((memory) => (
+          <span key={`${memory.date}-${memory.label}`} className="remember__chip">
+            {memory.label}
+          </span>
+        ))}
+      </span>
     </div>
   );
 }

@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import app as app_mod
 from llm import client as llm_client
 from llm import server as llm_server
-from memory import capture, retrieval
+from memory import capture, profile, retrieval
 from support import force_local_llamacpp_provider, stub_chat_provider_ready
 
 app = app_mod.app
@@ -48,6 +48,8 @@ def _stub_capture(monkeypatch):
     monkeypatch.setattr(capture, "capture_entry", fake_capture)
     monkeypatch.setattr(capture, "run_extraction_and_embed", fake_extract)
     monkeypatch.setattr(retrieval, "recall_memories", lambda *a, **k: [])
+    monkeypatch.setattr(retrieval, "recent_episodes", lambda *a, **k: [])
+    monkeypatch.setattr(profile, "retrieve_slices", lambda *a, **k: [])
     return captured
 
 
