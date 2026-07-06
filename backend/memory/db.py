@@ -41,7 +41,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # row per stable entry UID.
 # v5 (R8 / Phase 14): added `extractions.consolidated` so the write loop folds each
 # entry into L3 exactly once, even if its extraction finished after its day's run.
-SCHEMA_USER_VERSION = 5
+SCHEMA_USER_VERSION = 6
 
 
 def db_path() -> Path:
@@ -83,10 +83,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         # shape, so just stamp the version. `PRAGMA user_version` does not accept
         # bound parameters; the value is our own constant, never user input, so the
         # f-string is safe here.
+        _ensure_mood_series_unique_index(conn)
         conn.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION};")
         log.info("initialised eva.db schema at user_version=%d", SCHEMA_USER_VERSION)
     elif current < SCHEMA_USER_VERSION:
         _migrate(conn, current)
+    else:
+        _ensure_mood_series_unique_index(conn)
     conn.commit()
 
 
@@ -121,6 +124,10 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
         # in once, then marks it — never double-counting on later runs.
         _add_column_if_missing(conn, "extractions", "consolidated", "INTEGER NOT NULL DEFAULT 0")
         log.info("migrated eva.db schema v4 → v5 (extractions.consolidated)")
+    if from_version < 6:
+        _dedupe_mood_series(conn)
+        _ensure_mood_series_unique_index(conn)
+        log.info("migrated eva.db schema v5 to v6 (mood_series entry uniqueness)")
     conn.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION};")
 
 
@@ -135,6 +142,28 @@ def _add_column_if_missing(
     existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
     if column not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _dedupe_mood_series(conn: sqlite3.Connection) -> None:
+    """Keep the newest derived mood row for each entry before adding uniqueness."""
+    conn.execute(
+        """
+        DELETE FROM mood_series
+        WHERE rowid NOT IN (
+            SELECT MAX(rowid)
+            FROM mood_series
+            GROUP BY entry_id
+        )
+        """
+    )
+
+
+def _ensure_mood_series_unique_index(conn: sqlite3.Connection) -> None:
+    """Create the v6 mood uniqueness index after any needed dedupe has run."""
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mood_series_entry_id "
+        "ON mood_series(entry_id)"
+    )
 
 
 def get_or_create_db() -> sqlite3.Connection:
@@ -667,17 +696,14 @@ def upsert_mood_series(
     included deliberately because §7.1 and Phase 12 both specify that extraction —
     not a later phase — populates this table. No LLM is involved.
     """
-    conn.execute(
-        """
-        INSERT INTO mood_series (id, entry_id, date, mood, emotions, is_seeded)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            str(uuid.uuid4()), entry_id, date, mood,
-            json.dumps(emotions, ensure_ascii=False), 1 if is_seeded else 0,
-        ),
+    replace_mood_series(
+        conn,
+        entry_id=entry_id,
+        date=date,
+        mood=mood,
+        emotions=emotions,
+        is_seeded=is_seeded,
     )
-    conn.commit()
 
 
 def delete_mood_series(conn: sqlite3.Connection, entry_id: str) -> int:
@@ -722,11 +748,10 @@ def replace_mood_series(
 # ─────────────────────────────────────────────────────────────────────────────
 # L4 knowledge graph — read/write for graph_nodes & graph_edges (§7.1 / §7.4).
 #
-# The Phase-14 demo writes a *seeded* graph (is_seeded=1) via scripts/seed_demo.py
-# and reads it back through GET /insights/graph. The real L4 builder will write
-# is_seeded=0 rows through the same helpers; the read defaults to live-only
-# (is_seeded=0), with include_seeded=True lifting that for the demo — exactly the
-# recall rule the mood chart already follows.
+# Compatibility scripts may write a seeded graph (is_seeded=1), while real
+# computed graphs write is_seeded=0 rows through the same helpers. The read
+# defaults to live-only, with include_seeded=True lifting that for dev data -
+# exactly the recall rule the mood chart already follows.
 # ─────────────────────────────────────────────────────────────────────────────
 def insert_graph_node(
     conn: sqlite3.Connection,
@@ -816,10 +841,43 @@ def graph_edges_all(
     return conn.execute(f"SELECT * FROM graph_edges {where} ORDER BY weight DESC").fetchall()
 
 
+def graph_extractions(
+    conn: sqlite3.Connection, *, include_seeded: bool = False
+) -> list[sqlite3.Row]:
+    """Return done L1 rows with every structured field needed to build the graph."""
+    clauses = ["x.extraction_status = 'done'"]
+    if not include_seeded:
+        clauses.append("e.is_seeded = 0")
+    return conn.execute(
+        f"""
+        SELECT
+            e.id             AS entry_id,
+            e.date           AS date,
+            e.text           AS text,
+            e.is_seeded      AS is_seeded,
+            x.mood           AS mood,
+            x.emotions       AS emotions,
+            x.themes         AS themes,
+            x.entities       AS entities,
+            x.events         AS events,
+            x.stated_goals   AS stated_goals,
+            x.behaviors      AS behaviors,
+            x.decisions      AS decisions,
+            x.open_loops     AS open_loops,
+            x.self_judgments AS self_judgments,
+            x.summary        AS summary
+        FROM entries e
+        JOIN extractions x ON x.entry_id = e.id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY e.date ASC, e.created_at ASC, e.rowid ASC
+        """
+    ).fetchall()
+
+
 def seeded_extractions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Return every seeded entry joined to its done extraction (graph build input).
 
-    The Phase-14 graph builder reads this: each row carries the entry's ``id``,
+    The R10 graph builder reads this: each row carries the entry's ``id``,
     ``date``, ``text``, and the extraction's ``themes``/``emotions``/``entities``
     JSON, so the seeded graph is derived from the *same* data the mood chart uses
     — honest co-occurrence, not invented links.

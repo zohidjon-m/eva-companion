@@ -104,6 +104,7 @@ def test_weekly_mines_behavior_vs_goal_with_evidence_and_adds_watch_item(vault_e
     caller = scripted(
         ("profile-update component", ops),                   # the L3 ops generation
         ("work AGAINST that goal", "yes"),                   # model confirms the tension
+        ("High-impact claim", "yes"),                        # R10 evidence verification
         ("Write one short", "A week centred on exercise."),  # digest narration
     )
 
@@ -170,6 +171,33 @@ def test_weekly_does_not_flag_aligned_behavior_as_a_contradiction(vault_env):
     finally:
         conn.close()
     assert json.loads(digest["stats"])["contradictions"] == []
+
+
+def test_weekly_drops_confirmed_tension_when_verification_rejects_it(vault_env):
+    _seed("e1", date="2026-07-01", summary="Goal: exercise regularly.",
+          themes=["exercise"], stated_goals=[{"text": "exercise regularly", "is_new": True}])
+    _seed("e2", date="2026-07-02", summary="Skipped exercise.",
+          themes=["exercise"], behaviors=["skipped exercise"])
+    _seed("e3", date="2026-07-03", summary="Skipped exercise again.",
+          themes=["exercise"], behaviors=["skipped exercise"])
+
+    ops = (
+        '[{"op":"add_goal","text":"exercise regularly","evidence":["e1"]},'
+        '{"op":"add_pattern","text":"skips exercise","type":"behavior",'
+        '"evidence":["e2","e3"]}]'
+    )
+    caller = scripted(
+        ("profile-update component", ops),
+        ("work AGAINST that goal", "yes"),
+        ("High-impact claim", "no"),
+        ("Write one short", "A week centred on exercise."),
+    )
+
+    report = asyncio.run(consolidate.run_weekly("2026-07-07", call_model=caller))
+
+    assert report.watch_items_added == 0
+    assert report.confirmed_contradictions == []
+    assert profile_mod.get_profile().watch_list == []
 
 
 def test_late_extraction_is_picked_up_however_far_behind(vault_env):
@@ -251,6 +279,7 @@ def test_weekly_forms_patterns_even_when_entries_already_consolidated(vault_env)
     caller = scripted(
         ("profile-update component", ops),
         ("work AGAINST that goal", "yes"),
+        ("High-impact claim", "yes"),
         ("Write one short", "A week centred on exercise."),
     )
 

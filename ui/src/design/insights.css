@@ -240,7 +240,7 @@
 }
 
 /* =============================================================================
-   Phase 14 — Knowledge graph ("Connections")
+   R10 - Knowledge graph ("Connections")
    A bespoke force-directed SVG graph (no charting/graph dependency, matching the
    mood chart's offline, tokens-only ethos). Node colours are six categorical
    hues exposed as --nc per type class, reused by the legend and the panel tag.
@@ -569,7 +569,7 @@
 }
 
 /* =============================================================================
-   Phase 14 — Growth report ("Looking back")
+   R10 - Growth report ("Looking back")
    Descriptive, never a verdict: two period cards, observational prose, theme
    shifts, and a reflective closing question.
    ========================================================================== */
@@ -794,6 +794,82 @@
   justify-content: space-between;
   font-size: 10px;
   color: var(--text-muted);
+}
+
+/* --- R10 computed metrics ------------------------------------------------ */
+.growth__metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+@media (max-width: 760px) {
+  .growth__metrics {
+    grid-template-columns: 1fr;
+  }
+}
+.growth__metric-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.growth__metric-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+.growth__metric-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.growth__metric-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.growth__metric-col--now {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.growth__metric-col-label {
+  font-size: 9px;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.growth__metric-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.growth__metric-row strong {
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+}
+.growth__verified {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.growth__verified-item {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--text-xs);
 }
 
 /* --- Theme lanes ---------------------------------------------------------- */

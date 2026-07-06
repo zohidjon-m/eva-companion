@@ -7,7 +7,7 @@ import { useGraph } from "./useGraph";
 import { useGraphLayout, VB_H, VB_W } from "./useGraphLayout";
 
 /**
- * GraphView — the Phase-14 knowledge-graph surface.
+ * GraphView - the R10 knowledge-graph surface.
  *
  * A force-directed graph of the concepts Eva has drawn from your entries: typed
  * nodes (themes, people, places, goals, problems, emotions) joined by association
@@ -16,10 +16,9 @@ import { useGraphLayout, VB_H, VB_W } from "./useGraphLayout";
  * fact — render dashed and carry a confirm/dismiss affordance, never appearing as
  * a plain edge (§7.4).
  *
- * Confirm/dismiss is local UI state for the demo (# DEMO-STUB): the real L4 will
- * persist a confirmation as an anchor and a dismissal as a pruned edge. Here,
- * confirming makes the edge solid and dismissing hides it — so the affordance is
- * real and reversible within the session.
+ * Confirm/dismiss is local UI state in R10; a future slice can persist it. In
+ * this view, confirming makes the edge solid and dismissing hides it, so the
+ * affordance is real and reversible within the session.
  */
 
 const NODE_TYPE_LABEL: Record<NodeType, string> = {

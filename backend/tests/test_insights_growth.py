@@ -1,10 +1,4 @@
-"""Phase 14 — GET /insights/growth: a descriptive period comparison, never a verdict.
-
-The report must (a) compute real deltas (entry counts, average mood, theme shifts)
-over two windows, (b) auto-split the history when no windows are passed, (c) behave
-on an empty vault, and — the hard rule (§12) — (d) read DESCRIPTIVELY: no praise,
-no alarm, no judgment words anywhere in the prose it generates.
-"""
+"""R10 - GET /insights/growth: descriptive computed analytics."""
 
 from __future__ import annotations
 
@@ -14,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import app
-from memory import db
+from memory import db, growth
 
 
 @pytest.fixture()
@@ -23,32 +17,65 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
-def _entry(conn, *, date, mood, themes):
+def _entry(
+    conn,
+    *,
+    date,
+    mood,
+    themes=None,
+    stated_goals=None,
+    behaviors=None,
+    open_loops=None,
+    summary="a reflection",
+):
+    """Insert an entry plus done extraction and mood point for growth tests."""
     entry_id = str(uuid.uuid4())
     db.insert_entry(
-        conn, id=entry_id, date=date, type="journal", text="x", word_count=1,
-        created_at=f"{date}T21:30:00", is_seeded=False,
+        conn,
+        id=entry_id,
+        date=date,
+        type="journal",
+        text=summary,
+        word_count=len(summary.split()),
+        created_at=f"{date}T21:30:00",
+        is_seeded=False,
     )
     db.create_pending_extraction(conn, entry_id)
     db.finalize_extraction(
-        conn, entry_id, mood=mood, emotions=[], entities=[], themes=themes,
-        events=[], stated_goals=[], behaviors=[], decisions=[], open_loops=[],
-        self_judgments=[], summary="a reflection", extracted_at=f"{date}T21:30:01",
+        conn,
+        entry_id,
+        mood=mood,
+        emotions=[],
+        entities=[],
+        themes=themes or [],
+        events=[],
+        stated_goals=stated_goals or [],
+        behaviors=behaviors or [],
+        decisions=[],
+        open_loops=open_loops or [],
+        self_judgments=[],
+        summary=summary,
+        extracted_at=f"{date}T21:30:01",
     )
-    db.upsert_mood_series(conn, entry_id=entry_id, date=date, mood=mood, emotions=[], is_seeded=False)
+    db.upsert_mood_series(
+        conn, entry_id=entry_id, date=date, mood=mood, emotions=[], is_seeded=False
+    )
     return entry_id
 
 
-# Verdict / judgment vocabulary that must never appear in the generated prose.
 _BANNED = [
-    "better", "worse", "improv", "declin", "you should", "should try", "well done",
-    "good job", "great job", "proud", "setback", "on track", "succeed", "success",
-    "failing", "failure", "healthier", "unhealthy", "doing great", "keep it up",
+    "better", "worse", "improv", "declin", "you should", "should try",
+    "well done", "good job", "great job", "proud", "setback", "on track",
+    "succeed", "success", "failing", "failure", "healthier", "unhealthy",
+    "doing great", "keep it up",
 ]
 
 
 def _all_prose(report: dict) -> str:
-    parts = list(report["narrative"]) + [report["closing_question"], report["mood_delta"]["description"]]
+    parts = list(report["narrative"]) + [
+        report["closing_question"],
+        report["mood_delta"]["description"],
+    ]
     return " ".join(parts).lower()
 
 
@@ -57,27 +84,109 @@ def test_empty_vault_is_graceful(client):
     assert body["empty"] is True
 
 
-def test_explicit_periods_compute_deltas(client):
+def test_explicit_periods_compute_mood_theme_loop_and_behavior_deltas(client):
     conn = db.get_or_create_db()
-    # Earlier window: low mood, "work"/"stress". Recent window: higher, "running".
-    _entry(conn, date="2026-06-01", mood=-2, themes=["work", "stress"])
-    _entry(conn, date="2026-06-02", mood=-3, themes=["work", "conflict"])
-    _entry(conn, date="2026-06-10", mood=2, themes=["running", "calm"])
-    _entry(conn, date="2026-06-11", mood=3, themes=["running", "faith"])
+    _entry(
+        conn,
+        date="2026-06-01",
+        mood=-2,
+        themes=["work", "stress"],
+        stated_goals=[{"text": "exercise regularly", "is_new": True}],
+        behaviors=["skipped exercise"],
+        open_loops=[{"description": "book dentist", "status": "open"}],
+        summary="Said exercise matters, skipped exercise, and still needed to book dentist.",
+    )
+    _entry(
+        conn,
+        date="2026-06-02",
+        mood=-3,
+        themes=["work", "conflict"],
+        behaviors=["skipped exercise"],
+        summary="Skipped exercise again.",
+    )
+    _entry(
+        conn,
+        date="2026-06-10",
+        mood=2,
+        themes=["running", "calm"],
+        stated_goals=[{"text": "exercise regularly", "is_new": False}],
+        behaviors=["exercise session"],
+        open_loops=[{"description": "book dentist", "status": "resolved"}],
+        summary="Exercise session done, dentist booked.",
+    )
+    _entry(
+        conn,
+        date="2026-06-11",
+        mood=3,
+        themes=["running", "faith"],
+        behaviors=["skipped exercise"],
+        summary="Skipped exercise once, wrote about faith.",
+    )
     conn.close()
 
     body = client.get("/insights/growth", params={
         "a_from": "2026-06-01", "a_to": "2026-06-05",
         "b_from": "2026-06-08", "b_to": "2026-06-12",
-        "include_seeded": "false",
     }).json()
 
     assert body["empty"] is False
-    assert body["period_a"]["entry_count"] == 2 and body["period_b"]["entry_count"] == 2
-    assert body["period_a"]["avg_mood"] == -2.5 and body["period_b"]["avg_mood"] == 2.5
+    assert body["period_a"]["entry_count"] == 2
+    assert body["period_b"]["entry_count"] == 2
+    assert body["period_a"]["avg_mood"] == -2.5
+    assert body["period_b"]["avg_mood"] == 2.5
     assert body["mood_delta"]["change"] == 5.0
     assert "running" in body["theme_shifts"]["emerged"]
-    assert "conflict" in body["theme_shifts"]["faded"] or "work" in body["theme_shifts"]["faded"]
+
+    assert body["period_a"]["open_loops"]["open"]["count"] == 1
+    assert body["period_a"]["open_loops"]["resolution_rate"] == 0.0
+    assert body["period_b"]["open_loops"]["resolved"]["count"] == 1
+    assert body["period_b"]["open_loops"]["resolution_rate"] == 1.0
+    assert body["open_loop_delta"]["resolution_rate_change"] == 1.0
+
+    assert body["period_a"]["behaviors"]["contradicting"]["count"] == 2
+    assert body["period_b"]["behaviors"]["aligned"]["count"] == 1
+    assert body["period_b"]["behaviors"]["contradicting"]["count"] == 1
+    assert body["behavior_delta"]["change"]["aligned"] == 1
+    assert body["behavior_delta"]["change"]["contradicting"] == -1
+
+
+def test_high_impact_growth_claims_are_dropped_without_verification(client):
+    conn = db.get_or_create_db()
+    _entry(
+        conn,
+        date="2026-06-01",
+        mood=0,
+        themes=["exercise"],
+        stated_goals=[{"text": "exercise regularly", "is_new": True}],
+    )
+    _entry(
+        conn,
+        date="2026-06-10",
+        mood=0,
+        themes=["exercise"],
+        stated_goals=[{"text": "exercise regularly", "is_new": False}],
+        behaviors=["skipped exercise"],
+        open_loops=[{"description": "book dentist", "status": "resolved"}],
+    )
+    report = growth.compare_periods(
+        conn,
+        a_from="2026-06-01",
+        a_to="2026-06-05",
+        b_from="2026-06-08",
+        b_to="2026-06-12",
+    )
+    verified = growth.compare_periods(
+        conn,
+        a_from="2026-06-01",
+        a_to="2026-06-05",
+        b_from="2026-06-08",
+        b_to="2026-06-12",
+        verifier=lambda _claim, _evidence: True,
+    )
+    conn.close()
+
+    assert report["verified_claims"] == []
+    assert verified["verified_claims"]
 
 
 def test_report_reads_descriptively_never_a_verdict(client):
@@ -96,7 +205,6 @@ def test_report_reads_descriptively_never_a_verdict(client):
     for word in _BANNED:
         assert word not in prose, f"growth report used a verdict word: {word!r}"
     assert body["is_descriptive"] is True
-    # The closing line invites the user's own interpretation (it's a question).
     assert body["closing_question"].rstrip().endswith("?")
 
 
@@ -108,12 +216,10 @@ def test_auto_split_when_no_windows(client):
 
     body = client.get("/insights/growth").json()
     assert body["empty"] is False
-    # The two halves together cover all four entries.
     assert body["period_a"]["entry_count"] + body["period_b"]["entry_count"] == 4
 
 
 def test_auto_split_single_day_is_empty(client):
-    """Entries all on one day can't be split into two stretches → empty state."""
     conn = db.get_or_create_db()
     _entry(conn, date="2026-06-16", mood=1, themes=["work"])
     _entry(conn, date="2026-06-16", mood=2, themes=["calm"])
@@ -127,5 +233,6 @@ def test_partial_window_args_rejected(client):
 
 def test_bad_date_rejected(client):
     assert client.get("/insights/growth", params={
-        "a_from": "june", "a_to": "2026-06-05", "b_from": "2026-06-08", "b_to": "2026-06-12",
+        "a_from": "june", "a_to": "2026-06-05",
+        "b_from": "2026-06-08", "b_to": "2026-06-12",
     }).status_code == 400

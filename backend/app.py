@@ -54,9 +54,8 @@ from memory import capture, conversations, db, vault, vault_dir
 from memory import consolidate
 import scheduler as consolidation_scheduler
 
-# Phase 14 L4 insights (the seams): the seeded knowledge graph and the descriptive
-# growth report behind GET /insights/graph and GET /insights/growth. Both read the
-# same extracted data the mood chart uses. # DEMO-STUB until the real L4 builder.
+# R10 L4 insights: evidence-backed graph analytics and descriptive growth deltas.
+# Both read the same extracted data the mood chart uses.
 from memory import graph as graph_l4
 from memory import growth as growth_l4
 
@@ -1270,20 +1269,19 @@ def insights_mood(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 14 — Insights: the knowledge graph and the growth report (L4 seams).
+# R10 - Insights: evidence-backed graph analytics and growth report.
 #
 # Both are pure reads over the data Eva already extracted — no model is touched,
 # which keeps the graph deterministic and the growth report descriptive (§12: the
 # growth analytics must never read as a verdict; code computes, nothing judges).
-# The seeded demo data (scripts/seed_demo.py) is is_seeded=1, so both endpoints
-# default to live-only and lift that with ?include_seeded=true — the same demo
-# toggle the mood chart uses.
+# Seeded/dev data is is_seeded=1, so both endpoints default to live-only and
+# lift that with ?include_seeded=true - the same toggle the mood chart uses.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @app.get("/insights/graph")
 def insights_graph(
-    include_seeded: bool = Query(False, description="Include is_seeded=1 demo rows (the demo graph)."),
+    include_seeded: bool = Query(False, description="Include is_seeded=1 rows in the computed graph."),
 ) -> dict:
     """Return the knowledge graph as the EVA_MEMORY_ARCHITECTURE §7.4 payload.
 

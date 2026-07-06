@@ -2,7 +2,7 @@
 -- Increment PRAGMA user_version on every schema change; add a migration block in db.py.
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
--- PRAGMA user_version = 4;
+-- PRAGMA user_version = 6;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- L0 index (truth lives in Markdown files; this table is the queryable index)

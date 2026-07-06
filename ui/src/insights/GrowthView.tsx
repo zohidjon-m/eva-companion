@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { EmptyState } from "../components";
 import { InsightsArt } from "../sections/illustrations";
 import { fetchMood, type MoodPoint } from "./api";
-import type { GrowthReport, PeriodSummary } from "./growthApi";
+import type { BehaviorStats, GrowthReport, OpenLoopStats, PeriodSummary } from "./growthApi";
 import { moodWord } from "./mood";
 import { MoodArc } from "./MoodArc";
 import { useGrowth } from "./useGrowth";
@@ -126,6 +126,8 @@ function Report({ report, points }: { report: GrowthReport; points: MoodPoint[] 
         <PeriodCard label="Recent weeks" period={report.period_b} accent />
       </div>
 
+      <GrowthMetrics report={report} />
+
       {hasShifts && (
         <div className="growth__themes">
           <p className="growth__themes-title">What you were writing about</p>
@@ -161,6 +163,91 @@ function Report({ report, points }: { report: GrowthReport; points: MoodPoint[] 
 }
 
 /** A horizontal Rough→Great meter with a marker at the average mood. */
+function GrowthMetrics({ report }: { report: GrowthReport }) {
+  return (
+    <div className="growth__metrics">
+      <MetricGroup
+        title="Open loops"
+        a={report.open_loop_delta.period_a}
+        b={report.open_loop_delta.period_b}
+        render={(stats) => [
+          ["Open", stats.open.count],
+          ["Updated", stats.updated.count],
+          ["Resolved", stats.resolved.count],
+          ["Resolution", rate(stats.resolution_rate)],
+        ]}
+      />
+      <MetricGroup
+        title="Goal-linked behavior"
+        a={report.behavior_delta.period_a}
+        b={report.behavior_delta.period_b}
+        render={(stats) => [
+          ["With goals", stats.aligned.count],
+          ["Against goals", stats.contradicting.count],
+          ["No match", stats.unmatched.count],
+        ]}
+      />
+      {report.verified_claims.length > 0 && (
+        <div className="growth__verified">
+          {report.verified_claims.map((item) => (
+            <span key={item.claim} className="growth__verified-item">
+              {item.claim}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetricGroup<T extends OpenLoopStats | BehaviorStats>({
+  title,
+  a,
+  b,
+  render,
+}: {
+  title: string;
+  a: T;
+  b: T;
+  render: (stats: T) => [string, number | string][];
+}) {
+  return (
+    <div className="growth__metric-group">
+      <p className="growth__metric-title">{title}</p>
+      <div className="growth__metric-cols">
+        <MetricColumn label="Earlier" rows={render(a)} />
+        <MetricColumn label="Recent" rows={render(b)} accent />
+      </div>
+    </div>
+  );
+}
+
+function MetricColumn({
+  label,
+  rows,
+  accent,
+}: {
+  label: string;
+  rows: [string, number | string][];
+  accent?: boolean;
+}) {
+  return (
+    <div className={`growth__metric-col${accent ? " growth__metric-col--now" : ""}`}>
+      <span className="growth__metric-col-label">{label}</span>
+      {rows.map(([name, value]) => (
+        <span key={name} className="growth__metric-row">
+          <span>{name}</span>
+          <strong>{value}</strong>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function rate(value: number | null): string {
+  return value === null ? "n/a" : `${Math.round(value * 100)}%`;
+}
+
 function MoodMeter({ mood, accent }: { mood: number | null; accent?: boolean }) {
   if (mood === null) {
     return <div className="growth__meter growth__meter--empty">no mood noted</div>;

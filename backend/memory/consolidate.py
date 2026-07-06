@@ -37,7 +37,7 @@ from datetime import date, timedelta
 
 import asyncio
 
-from . import capture, db, operations
+from . import capture, db, operations, verification
 from . import profile as profile_mod
 from .operations import ModelCaller
 from .profile import Profile
@@ -453,7 +453,11 @@ async def _revalidate_flagged_claims(
             checked += 1
             cited = list(claim.get("evidence") or []) + list(claim.get("counter_evidence") or [])
             summaries = _summaries_for(conn, cited)
-            supported = await _yes_no(_revalidation_prompt(claim, summaries), call_model)
+            supported = await verification.verify_claim_supported(
+                str(claim.get("text") or ""),
+                summaries,
+                call_model or operations._llama_server_call,
+            )
             if supported is None:
                 # Couldn't decide (no model / unparseable) — leave the flag for later.
                 checked -= 1
@@ -673,15 +677,28 @@ async def _record_contradictions(
                 cand.goal_text, opposes,
             )
             continue
+        description = (
+            f"Wants to {cand.goal_text}, but acted against it {cand.count} time(s) "
+            f"this week."
+        )
+        summaries = _summaries_for_ids(sorted(set(cand.goal_evidence + evidence)))
+        supported = await verification.verify_claim_supported(
+            description,
+            summaries,
+            call_model or operations._llama_server_call,
+        )
+        if supported is not True:
+            log.info(
+                "weekly: confirmed tension on %r failed evidence verification (%r)",
+                cand.goal_text, supported,
+            )
+            continue
         confirmed.append(cand)
         ops.append({
             "op": "note_contradiction",
             "claim_id_a": pattern["id"],
             "claim_id_b": goal["id"],
-            "description": (
-                f"Wants to {cand.goal_text}, but acted against it {cand.count} time(s) "
-                f"this week."
-            ),
+            "description": description,
             "evidence": evidence,
         })
 
@@ -929,6 +946,15 @@ def _summaries_for(conn, entry_ids: list[str]) -> list[str]:
         if row is not None and row["summary"]:
             out.append(str(row["summary"]))
     return out
+
+
+def _summaries_for_ids(entry_ids: list[str]) -> list[str]:
+    """Open a short-lived DB connection and return current summaries for entry IDs."""
+    conn = db.get_or_create_db()
+    try:
+        return _summaries_for(conn, entry_ids)
+    finally:
+        conn.close()
 
 
 async def _yes_no(prompt: str, call_model: ModelCaller | None) -> bool | None:

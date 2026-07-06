@@ -1,115 +1,63 @@
-"""L4 knowledge graph — the Phase-14 seeded builder + the §7.4 read shape.
+"""L4 knowledge graph computed from real L1 extraction fields.
 
-# DEMO-STUB: replaced by the real L4 build_graph()
-# ─────────────────────────────────────────────────────────────────────────────
-# This module is the SEAM the real L4 graph builder plugs into later. Two jobs:
-#
-#   * :func:`build_seed_graph` / :func:`store_seed_graph` — derive a *seeded*
-#     knowledge graph from the demo extractions (scripts/seed_demo.py) and persist
-#     it to ``graph_nodes``/``graph_edges`` with ``is_seeded=1`` so it can be
-#     pruned the day the real builder runs. The real builder writes ``is_seeded=0``
-#     rows through the same ``db`` helpers; nothing downstream changes.
-#   * :func:`read_graph` — return the exact EVA_MEMORY_ARCHITECTURE §7.4 payload
-#     for ``GET /insights/graph``. This is the contract the real L4 must satisfy.
-#
-# Honesty (Phase 14): the bulk of the graph is derived from the *same* extracted
-# data the mood chart uses — theme and emotion nodes come straight from the
-# seeded extractions, with co-occurrence edges between concepts that genuinely
-# appear in the same entries. Person/place/goal/problem nodes need fields the demo
-# seed doesn't carry (the seeded extractions store only themes + emotions), so
-# they are recovered by a tiny curated lexicon scanned over the seeded entry text
-# — a stand-in for the entity/open-loop extraction the real L1 produces, and still
-# tied to the actual entries that mention each term. Nothing is invented: every
-# node and edge points at real seeded entries as its evidence.
-# ─────────────────────────────────────────────────────────────────────────────
+R10 keeps the public graph schema from the earlier insights surface, but replaces
+the demo lexicon with deterministic nodes and edges from the structured L1 data.
+The graph is a derived view: every node and edge carries evidence entry IDs, and
+the endpoint computes the view from current extractions so edited entries are
+reflected without a manual graph rebuild.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
-import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date
+from itertools import combinations
+from typing import Iterable
 
 from . import db
 
 log = logging.getLogger("eva.memory.graph")
 
-# The §7.4 enums, kept here so the builder and the validator agree on the contract.
 NODE_TYPES = ("theme", "person", "place", "goal", "problem", "emotion")
 EDGE_TYPES = ("co_occurrence", "temporal", "similarity", "hypothesis")
 
-# Tuning for a readable ~25–30 node demo graph (see module docstring):
-THEME_MIN_SUPPORT = 2  # auto-derived theme/emotion nodes need ≥2 entries to earn a place
-EDGE_FLOOR = 0.5       # drop weak co-occurrence (overlap coefficient below this)
-MAX_DEGREE = 6         # cap co-occurrence edges per node so the graph never hairballs
+TEMPORAL_WINDOW_DAYS = 21
+SIMILARITY_THRESHOLD = 0.5
+HYPOTHESIS_MIN_SUPPORT = 2
+MAX_EDGES_PER_TYPE = 80
 
-# Curated lexicon — a DEMO-STUB stand-in for entity / open-loop / goal extraction.
-# Each (pattern, type, label) is scanned over the seeded entry text; the node's
-# evidence is exactly the entries whose text matches. Labels are distinct from the
-# theme/emotion labels so a concept never appears twice under two types.
-_LEXICON: list[tuple[str, str, str]] = [
-    (r"\bdaniel\b", "person", "Daniel"),
-    (r"\b(?:mother|mum)\b", "person", "My mother"),
-    (r"\briver\b", "place", "The river"),
-    (r"\bbridge\b", "place", "The bridge"),
-    (r"\bfajr\b", "goal", "Praying fajr"),
-    (r"\b(?:run|ran|running)\b", "goal", "A running habit"),
-    (r"\btemper\b", "goal", "Keeping my temper"),
-    (r"\bscope\b", "problem", "Shifting project scope"),
-    (r"\bdeadline\b", "problem", "Deadline pressure"),
-    (r"self-doubt|not good at this", "problem", "Self-doubt at work"),
-]
-_LEXICON_COMPILED = [(re.compile(p, re.IGNORECASE), t, label) for p, t, label in _LEXICON]
+_WORD_RE = re.compile(r"[a-z0-9']+")
+_STOPWORDS = frozenset(
+    """
+    a an and are as at be but by did do does doing for from had has have i if in
+    into is it its me my of on or our so that the their them then they this to up
+    was we were what when which who why will with you your
+    """.split()
+)
 
-# John demo lexicon (scripts/seed_john.py). Themes already cover his habits
-# (screen time, running, cooking, reading, …), so the lexicon only adds what the
-# structured theme/emotion fields can't express — the people and places he writes
-# about — keeping every label distinct from a theme so a concept never doubles up.
-_JOHN_LEXICON: list[tuple[str, str, str]] = [
-    (r"\bmarcus\b", "person", "Marcus"),
-    (r"\bsarah\b", "person", "Sarah"),
-    (r"\blake\b", "place", "The lake"),
-    (r"\bmarket\b", "place", "The market"),
-    (r"\bpark\b", "place", "The park"),
-]
-_JOHN_LEXICON_COMPILED = [(re.compile(p, re.IGNORECASE), t, label) for p, t, label in _JOHN_LEXICON]
-
-# Curated hypothesis edges — the only model-*proposed* links (everything else is
-# observed co-occurrence). Each names two concept labels that must already exist as
-# nodes; the edge is rendered dashed with a confirm/dismiss affordance and is never
-# presented as established fact (§7.4). (source_label, target_label, edge_label, weight).
-_HYPOTHESES: list[tuple[str, str, str, float]] = [
-    ("A running habit", "calm", "may be steadying you", 0.6),
-    ("Praying fajr", "discipline", "may be reinforcing", 0.58),
-    ("Deadline pressure", "anxiety", "may be a trigger for", 0.62),
-]
-
-# John's proposed (dashed) links — endpoints must be labels that survive as nodes.
-_JOHN_HYPOTHESES: list[tuple[str, str, str, float]] = [
-    ("screen time", "sleep", "may be costing you", 0.62),
-    ("running", "calm", "may be steadying you", 0.6),
-    ("Marcus", "connection", "may be lifting your mood", 0.58),
-]
+ConceptKey = tuple[str, str]
 
 
 @dataclass
 class GraphNode:
-    """One §7.4 node: a typed concept and the entries that evidence it."""
+    """One graph node: a typed concept and the entry IDs that evidence it."""
 
     id: str
     label: str
     type: str
     entry_count: int
     entries: list[str] = field(default_factory=list)
-    is_seeded: bool = True
+    is_seeded: bool = False
 
 
 @dataclass
 class GraphEdge:
-    """One §7.4 edge. A hypothesis edge carries ``is_hypothesis=True`` + a label."""
+    """One graph edge with explicit evidence and a stable edge type."""
 
     id: str
     source: str
@@ -119,11 +67,20 @@ class GraphEdge:
     is_hypothesis: bool
     label: str | None
     entries: list[str] = field(default_factory=list)
-    is_seeded: bool = True
+    is_seeded: bool = False
+
+
+@dataclass
+class _EntryConcepts:
+    """Parsed graph concepts for one L1 extraction row."""
+
+    entry_id: str
+    day: str
+    concepts: set[ConceptKey]
 
 
 def _json_list(raw: str | None) -> list:
-    """Decode a JSON-list TEXT column, tolerating NULL/garbage (→ ``[]``)."""
+    """Decode a JSON-list TEXT column, tolerating NULL and malformed values."""
     if not raw:
         return []
     try:
@@ -133,248 +90,380 @@ def _json_list(raw: str | None) -> list:
     return value if isinstance(value, list) else []
 
 
+def _get(row, key: str, default=None):
+    """Read ``key`` from a dict or sqlite row without assuming all fields exist."""
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
+def _normalise(text: str) -> str:
+    """Return a stable lowercase key for concept matching and IDs."""
+    return " ".join(str(text or "").strip().split()).casefold()
+
+
+def _display_label(text: str, *, lower: bool = False) -> str:
+    """Return the readable graph label for a stored L1 value."""
+    label = " ".join(str(text or "").strip().split())
+    return label.lower() if lower else label
+
+
+def _stable_id(prefix: str, *parts: str) -> str:
+    """Make a short deterministic ID from stable graph identity parts."""
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:14]
+    return f"{prefix}-{digest}"
+
+
+def _tokens(text: str) -> set[str]:
+    """Content-word token set used by deterministic similarity scoring."""
+    return {t for t in _WORD_RE.findall(str(text).lower()) if t not in _STOPWORDS}
+
+
+def _overlap(a: set[str], b: set[str]) -> float:
+    """Return overlap coefficient, useful for short concept labels."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _day_number(day: str) -> int | None:
+    """Convert an ISO date to an ordinal, returning None for invalid dates."""
+    try:
+        return date.fromisoformat(day).toordinal()
+    except (TypeError, ValueError):
+        return None
+
+
 def build_seed_graph(rows) -> tuple[list[GraphNode], list[GraphEdge]]:
-    """Build the *seeded* demo graph (is_seeded=True) — thin wrapper over the core."""
-    return _build_graph(
-        rows, lexicon_compiled=_LEXICON_COMPILED, hypotheses=_HYPOTHESES, is_seeded=True
-    )
+    """Build a graph from seeded rows for legacy seed scripts and tests."""
+    return build_graph(rows, is_seeded=True)
 
 
-def _build_graph(
-    rows, *, lexicon_compiled, hypotheses, is_seeded: bool
-) -> tuple[list[GraphNode], list[GraphEdge]]:
-    """Derive (nodes, edges) from extraction rows. Pure — no DB writes.
+def build_graph(rows, *, is_seeded: bool = False) -> tuple[list[GraphNode], list[GraphEdge]]:
+    """Build graph nodes and evidence-backed edges from L1 extraction rows."""
+    concept_entries: dict[ConceptKey, set[str]] = defaultdict(set)
+    concept_labels: dict[ConceptKey, str] = {}
+    entry_records: list[_EntryConcepts] = []
 
-    ``rows`` are extraction rows (entry_id, text, themes JSON, emotions JSON).
-    Theme and emotion nodes are read from the structured fields; person/place/
-    goal/problem nodes come from the given ``lexicon_compiled`` scan over the entry
-    text. Edges are the co-occurrence between concepts that share entries (overlap
-    coefficient, thresholded and degree-capped), plus the given ``hypotheses``
-    edges. ``is_seeded`` stamps every node/edge so the seeded demo and the real
-    graph share this one builder while staying separable in the DB.
-    """
-    # 1. Concept → set of entry-ids it appears in, with a type. Emotions are added
-    #    first so a label shared by an emotion and a theme (e.g. "calm") resolves
-    #    to a single emotion node (the entries are unioned, never duplicated).
-    concept_entries: dict[str, set[str]] = defaultdict(set)
-    concept_type: dict[str, str] = {}
+    def add(concepts: set[ConceptKey], entry_id: str, ctype: str, label: str) -> None:
+        display = _display_label(label, lower=ctype in {"theme", "emotion"})
+        norm = _normalise(display)
+        if not display or not norm or ctype not in NODE_TYPES:
+            return
+        key = (ctype, norm)
+        concepts.add(key)
+        concept_entries[key].add(entry_id)
+        concept_labels.setdefault(key, display)
 
-    def _add(label: str, ctype: str, entry_id: str) -> None:
-        if label not in concept_type:
-            concept_type[label] = ctype
-        concept_entries[label].add(entry_id)
-
-    for r in rows:
-        eid = r["entry_id"]
-        for emo in _json_list(r["emotions"]):
-            name = (emo.get("name") if isinstance(emo, dict) else str(emo)).strip().lower()
-            if name:
-                _add(name, "emotion", eid)
-    for r in rows:
-        eid = r["entry_id"]
-        for theme in _json_list(r["themes"]):
-            label = str(theme).strip().lower()
-            if label:  # collides with an emotion of the same name → unions into it
-                _add(label, concept_type.get(label, "theme"), eid)
-    for r in rows:
-        eid = r["entry_id"]
-        text = (r["text"] or "")
-        for pattern, ctype, label in lexicon_compiled:
-            if pattern.search(text):
-                _add(label, ctype, eid)
-
-    # 2. Keep auto-derived theme/emotion nodes only with real support; curated
-    #    lexicon nodes (person/place/goal/problem) are always kept.
-    kept: dict[str, set[str]] = {}
-    for label, entries in concept_entries.items():
-        ctype = concept_type[label]
-        if ctype in ("theme", "emotion") and len(entries) < THEME_MIN_SUPPORT:
+    for row in rows:
+        entry_id = str(_get(row, "entry_id") or "").strip()
+        if not entry_id:
             continue
-        kept[label] = entries
+        concepts: set[ConceptKey] = set()
 
-    # 3. Materialise nodes with stable ids and a label → id map for the edges.
-    nodes: list[GraphNode] = []
-    node_id: dict[str, str] = {}
-    for label in sorted(kept, key=lambda l: (-len(kept[l]), l)):
-        nid = f"n-{uuid.uuid4()}"
-        node_id[label] = nid
-        nodes.append(
-            GraphNode(
-                id=nid,
-                label=label,
-                type=concept_type[label],
-                entry_count=len(kept[label]),
-                entries=sorted(kept[label]),
-                is_seeded=is_seeded,
+        for theme in _json_list(_get(row, "themes")):
+            add(concepts, entry_id, "theme", str(theme))
+
+        for emotion in _json_list(_get(row, "emotions")):
+            name = emotion.get("name") if isinstance(emotion, dict) else emotion
+            add(concepts, entry_id, "emotion", str(name))
+
+        for entity in _json_list(_get(row, "entities")):
+            if not isinstance(entity, dict):
+                continue
+            raw_type = str(entity.get("type") or "").strip().lower()
+            ctype = raw_type if raw_type in {"person", "place"} else "theme"
+            label = entity.get("name") or entity.get("normalized") or ""
+            add(concepts, entry_id, ctype, str(label))
+
+        for goal in _json_list(_get(row, "stated_goals")):
+            text = goal.get("text") if isinstance(goal, dict) else goal
+            add(concepts, entry_id, "goal", str(text))
+
+        for loop in _json_list(_get(row, "open_loops")):
+            text = loop.get("description") if isinstance(loop, dict) else loop
+            add(concepts, entry_id, "problem", str(text))
+
+        entry_records.append(
+            _EntryConcepts(
+                entry_id=entry_id,
+                day=str(_get(row, "date") or ""),
+                concepts=concepts,
             )
         )
 
-    # 4. Hypothesis edges first; record their (unordered) pairs so co-occurrence
-    #    never duplicates a hypothesised link as a plain edge.
-    edges: list[GraphEdge] = []
-    hypothesis_pairs: set[frozenset[str]] = set()
-    for src_label, tgt_label, edge_label, weight in hypotheses:
-        if src_label not in node_id or tgt_label not in node_id:
-            continue  # endpoint didn't survive the support filter — skip silently
-        shared = kept[src_label] & kept[tgt_label]
-        evidence = sorted(shared) if shared else sorted(kept[src_label])
-        edges.append(
-            GraphEdge(
-                id=f"e-{uuid.uuid4()}",
-                source=node_id[src_label],
-                target=node_id[tgt_label],
-                type="hypothesis",
-                weight=weight,
-                is_hypothesis=True,
-                label=edge_label,
-                entries=evidence,
-                is_seeded=is_seeded,
-            )
+    node_id = {key: _stable_id("n", key[0], key[1]) for key in concept_entries}
+    nodes = [
+        GraphNode(
+            id=node_id[key],
+            label=concept_labels[key],
+            type=key[0],
+            entry_count=len(entries),
+            entries=sorted(entries),
+            is_seeded=is_seeded,
         )
-        hypothesis_pairs.add(frozenset((src_label, tgt_label)))
-
-    # 5. Co-occurrence candidates: every node pair sharing ≥1 entry, scored by the
-    #    overlap coefficient and thresholded; then greedily kept strongest-first
-    #    under a per-node degree cap so dense days don't fan out into a hairball.
-    labels = list(kept)
-    candidates: list[tuple[float, str, str, list[str]]] = []
-    for i in range(len(labels)):
-        for j in range(i + 1, len(labels)):
-            a, b = labels[i], labels[j]
-            if frozenset((a, b)) in hypothesis_pairs:
-                continue
-            shared = kept[a] & kept[b]
-            if not shared:
-                continue
-            weight = len(shared) / min(len(kept[a]), len(kept[b]))
-            if weight < EDGE_FLOOR:
-                continue
-            candidates.append((weight, a, b, sorted(shared)))
-
-    candidates.sort(key=lambda c: -c[0])
-    degree: dict[str, int] = defaultdict(int)
-    for weight, a, b, shared in candidates:
-        if degree[a] >= MAX_DEGREE or degree[b] >= MAX_DEGREE:
-            continue
-        degree[a] += 1
-        degree[b] += 1
-        edges.append(
-            GraphEdge(
-                id=f"e-{uuid.uuid4()}",
-                source=node_id[a],
-                target=node_id[b],
-                type="co_occurrence",
-                weight=round(weight, 2),
-                is_hypothesis=False,
-                label=None,
-                entries=shared,
-                is_seeded=is_seeded,
-            )
+        for key, entries in sorted(
+            concept_entries.items(),
+            key=lambda item: (-len(item[1]), item[0][0], concept_labels[item[0]].lower()),
         )
+    ]
 
+    edges = _build_edges(entry_records, concept_entries, concept_labels, node_id, is_seeded)
     return nodes, edges
 
 
-def store_seed_graph(conn) -> tuple[int, int]:
-    """Rebuild the seeded graph from seeded extractions and persist it. Idempotent.
+def _build_edges(
+    entries: list[_EntryConcepts],
+    concept_entries: dict[ConceptKey, set[str]],
+    concept_labels: dict[ConceptKey, str],
+    node_id: dict[ConceptKey, str],
+    is_seeded: bool,
+) -> list[GraphEdge]:
+    """Build deterministic co-occurrence, temporal, similarity, and hypothesis edges."""
+    co_edges = _co_occurrence_edges(entries, concept_entries, node_id, is_seeded)
+    temporal_counts = _temporal_counts(entries)
+    temporal_edges = _temporal_edges(temporal_counts, node_id, is_seeded)
+    similarity_edges = _similarity_edges(concept_entries, concept_labels, node_id, is_seeded)
+    hypothesis_edges = _hypothesis_edges(temporal_counts, node_id, is_seeded)
 
-    Clears any existing ``is_seeded=1`` graph rows, then writes the freshly built
-    nodes and edges. Real (``is_seeded=0``) rows are never touched. Returns the
-    (nodes, edges) counts written.
-    """
-    rows = db.seeded_extractions(conn)
-    nodes, edges = build_seed_graph(rows)
+    return (
+        _limit_edges(co_edges)
+        + _limit_edges(temporal_edges)
+        + _limit_edges(similarity_edges)
+        + _limit_edges(hypothesis_edges)
+    )
 
-    db.clear_seeded_graph(conn)
+
+def _co_occurrence_edges(
+    entries: list[_EntryConcepts],
+    concept_entries: dict[ConceptKey, set[str]],
+    node_id: dict[ConceptKey, str],
+    is_seeded: bool,
+) -> list[GraphEdge]:
+    """Create association edges for concepts appearing in the same entry."""
+    evidence: dict[tuple[ConceptKey, ConceptKey], set[str]] = defaultdict(set)
+    for rec in entries:
+        for a, b in combinations(sorted(rec.concepts), 2):
+            evidence[(a, b)].add(rec.entry_id)
+
+    edges: list[GraphEdge] = []
+    for (a, b), entry_ids in evidence.items():
+        if not entry_ids:
+            continue
+        denom = min(len(concept_entries[a]), len(concept_entries[b])) or 1
+        weight = round(min(1.0, len(entry_ids) / denom), 2)
+        edges.append(
+            _edge(
+                "co_occurrence", a, b, node_id, weight, sorted(entry_ids), False,
+                None, is_seeded,
+            )
+        )
+    return edges
+
+
+def _temporal_counts(
+    entries: list[_EntryConcepts],
+) -> dict[tuple[ConceptKey, ConceptKey], tuple[int, set[str]]]:
+    """Count concept pairs where one appears before another within the time window."""
+    counts: dict[tuple[ConceptKey, ConceptKey], list] = {}
+    dated = [(rec, _day_number(rec.day)) for rec in entries]
+    for i, (earlier, earlier_day) in enumerate(dated):
+        if earlier_day is None:
+            continue
+        for later, later_day in dated[i + 1:]:
+            if later_day is None:
+                continue
+            delta = later_day - earlier_day
+            if delta <= 0 or delta > TEMPORAL_WINDOW_DAYS:
+                continue
+            for src in earlier.concepts:
+                for tgt in later.concepts:
+                    if src == tgt:
+                        continue
+                    item = counts.setdefault((src, tgt), [0, set()])
+                    item[0] += 1
+                    item[1].update({earlier.entry_id, later.entry_id})
+    return {pair: (count, evidence) for pair, (count, evidence) in counts.items()}
+
+
+def _temporal_edges(
+    counts: dict[tuple[ConceptKey, ConceptKey], tuple[int, set[str]]],
+    node_id: dict[ConceptKey, str],
+    is_seeded: bool,
+) -> list[GraphEdge]:
+    """Create directed temporal edges from ordered concept appearances."""
+    edges: list[GraphEdge] = []
+    for (src, tgt), (count, entry_ids) in counts.items():
+        if not entry_ids:
+            continue
+        weight = round(min(1.0, count / 4), 2)
+        edges.append(
+            _edge(
+                "temporal", src, tgt, node_id, weight, sorted(entry_ids), False,
+                None, is_seeded,
+            )
+        )
+    return edges
+
+
+def _similarity_edges(
+    concept_entries: dict[ConceptKey, set[str]],
+    concept_labels: dict[ConceptKey, str],
+    node_id: dict[ConceptKey, str],
+    is_seeded: bool,
+) -> list[GraphEdge]:
+    """Create deterministic lexical-similarity edges between concept labels."""
+    edges: list[GraphEdge] = []
+    keys = sorted(concept_entries)
+    for a, b in combinations(keys, 2):
+        if a[1] == b[1]:
+            continue
+        score = _overlap(_tokens(concept_labels[a]), _tokens(concept_labels[b]))
+        if score < SIMILARITY_THRESHOLD:
+            continue
+        evidence = sorted(concept_entries[a] | concept_entries[b])
+        if not evidence:
+            continue
+        edges.append(
+            _edge(
+                "similarity", a, b, node_id, round(score, 2), evidence, False,
+                None, is_seeded,
+            )
+        )
+    return edges
+
+
+def _hypothesis_edges(
+    counts: dict[tuple[ConceptKey, ConceptKey], tuple[int, set[str]]],
+    node_id: dict[ConceptKey, str],
+    is_seeded: bool,
+) -> list[GraphEdge]:
+    """Create clearly marked hypothesis edges from repeated temporal evidence."""
+    edges: list[GraphEdge] = []
+    for (src, tgt), (count, entry_ids) in counts.items():
+        if count < HYPOTHESIS_MIN_SUPPORT or not entry_ids:
+            continue
+        weight = round(min(1.0, 0.45 + count / 10), 2)
+        edges.append(
+            _edge(
+                "hypothesis", src, tgt, node_id, weight, sorted(entry_ids), True,
+                "may be related to", is_seeded,
+            )
+        )
+    return edges
+
+
+def _edge(
+    edge_type: str,
+    src: ConceptKey,
+    tgt: ConceptKey,
+    node_id: dict[ConceptKey, str],
+    weight: float,
+    entries: list[str],
+    is_hypothesis: bool,
+    label: str | None,
+    is_seeded: bool,
+) -> GraphEdge:
+    """Materialise a graph edge with stable IDs and clamped weight."""
+    source = node_id[src]
+    target = node_id[tgt]
+    return GraphEdge(
+        id=_stable_id("e", edge_type, source, target),
+        source=source,
+        target=target,
+        type=edge_type,
+        weight=max(0.0, min(1.0, weight)),
+        is_hypothesis=is_hypothesis,
+        label=label,
+        entries=entries,
+        is_seeded=is_seeded,
+    )
+
+
+def _limit_edges(edges: Iterable[GraphEdge]) -> list[GraphEdge]:
+    """Keep the strongest edges of one type so dense journals stay readable."""
+    return sorted(
+        edges,
+        key=lambda e: (-e.weight, e.type, e.source, e.target),
+    )[:MAX_EDGES_PER_TYPE]
+
+
+def _payload(nodes: list[GraphNode], edges: list[GraphEdge]) -> dict:
+    """Return the public ``/insights/graph`` payload shape."""
+    node_ids = {n.id for n in nodes}
+    return {
+        "nodes": [
+            {
+                "id": n.id,
+                "label": n.label,
+                "type": n.type,
+                "entry_count": n.entry_count,
+                "entries": n.entries,
+            }
+            for n in nodes
+        ],
+        "edges": [
+            {
+                "id": e.id,
+                "source": e.source,
+                "target": e.target,
+                "type": e.type,
+                "weight": e.weight,
+                "is_hypothesis": e.is_hypothesis,
+                "label": e.label,
+                "entries": e.entries,
+            }
+            for e in edges
+            if e.source in node_ids and e.target in node_ids and e.entries
+        ],
+    }
+
+
+def _persist(conn, nodes: list[GraphNode], edges: list[GraphEdge], *, is_seeded: bool) -> None:
+    """Persist a computed graph for compatibility with seed scripts."""
+    if is_seeded:
+        db.clear_seeded_graph(conn)
+    else:
+        conn.execute("DELETE FROM graph_edges WHERE is_seeded = 0")
+        conn.execute("DELETE FROM graph_nodes WHERE is_seeded = 0")
     for n in nodes:
         db.insert_graph_node(
             conn, id=n.id, label=n.label, type=n.type,
-            entry_count=n.entry_count, entries=n.entries, is_seeded=True,
+            entry_count=n.entry_count, entries=n.entries, is_seeded=is_seeded,
         )
     for e in edges:
         db.insert_graph_edge(
             conn, id=e.id, source=e.source, target=e.target, type=e.type,
             weight=e.weight, is_hypothesis=e.is_hypothesis, label=e.label,
-            entries=e.entries, is_seeded=True,
+            entries=e.entries, is_seeded=is_seeded,
         )
     conn.commit()
+
+
+def store_seed_graph(conn) -> tuple[int, int]:
+    """Compute and persist the seeded graph for legacy demo tooling."""
+    rows = [r for r in db.graph_extractions(conn, include_seeded=True) if bool(r["is_seeded"])]
+    nodes, edges = build_graph(rows, is_seeded=True)
+    _persist(conn, nodes, edges, is_seeded=True)
     log.info("stored seeded graph: %d node(s), %d edge(s)", len(nodes), len(edges))
     return len(nodes), len(edges)
 
 
 def store_graph(conn) -> tuple[int, int]:
-    """Build the REAL graph (is_seeded=0) from real extractions and persist it.
-
-    The live counterpart to :func:`store_seed_graph`: reads the user's real
-    extractions, builds nodes/edges with the John demo lexicon/hypotheses, and
-    replaces the existing ``is_seeded=0`` graph rows. Seeded rows are untouched.
-    Returns the (nodes, edges) counts written.
-    """
-    rows = db.real_extractions(conn)
-    nodes, edges = _build_graph(
-        rows, lexicon_compiled=_JOHN_LEXICON_COMPILED, hypotheses=_JOHN_HYPOTHESES,
-        is_seeded=False,
-    )
-
-    conn.execute("DELETE FROM graph_edges WHERE is_seeded = 0")
-    conn.execute("DELETE FROM graph_nodes WHERE is_seeded = 0")
-    for n in nodes:
-        db.insert_graph_node(
-            conn, id=n.id, label=n.label, type=n.type,
-            entry_count=n.entry_count, entries=n.entries, is_seeded=False,
-        )
-    for e in edges:
-        db.insert_graph_edge(
-            conn, id=e.id, source=e.source, target=e.target, type=e.type,
-            weight=e.weight, is_hypothesis=e.is_hypothesis, label=e.label,
-            entries=e.entries, is_seeded=False,
-        )
-    conn.commit()
-    log.info("stored real graph: %d node(s), %d edge(s)", len(nodes), len(edges))
+    """Compute and persist the live graph for scripts that expect stored rows."""
+    nodes, edges = build_graph(db.graph_extractions(conn, include_seeded=False), is_seeded=False)
+    _persist(conn, nodes, edges, is_seeded=False)
+    log.info("stored live graph: %d node(s), %d edge(s)", len(nodes), len(edges))
     return len(nodes), len(edges)
 
 
-def _node_payload(row) -> dict:
-    """Map a ``graph_nodes`` row to the §7.4 node shape."""
-    return {
-        "id": row["id"],
-        "label": row["label"],
-        "type": row["type"],
-        "entry_count": row["entry_count"],
-        "entries": _json_list(row["entries"]),
-    }
-
-
-def _edge_payload(row) -> dict:
-    """Map a ``graph_edges`` row to the §7.4 edge shape (is_hypothesis as a bool)."""
-    return {
-        "id": row["id"],
-        "source": row["source"],
-        "target": row["target"],
-        "type": row["type"],
-        "weight": row["weight"],
-        "is_hypothesis": bool(row["is_hypothesis"]),
-        "label": row["label"],
-        "entries": _json_list(row["entries"]),
-    }
-
-
 def read_graph(conn, *, include_seeded: bool = False) -> dict:
-    """Return the §7.4 ``{nodes, edges}`` payload for ``GET /insights/graph``.
-
-    Live-only by default (``is_seeded=0``); ``include_seeded=True`` lifts that for
-    the demo. Edges whose endpoints aren't in the returned node set are dropped, so
-    the payload is always internally consistent (an edge never dangles) — this
-    matters when the live filter returns a subset of nodes.
-    """
-    node_rows = db.graph_nodes_all(conn, include_seeded=include_seeded)
-    edge_rows = db.graph_edges_all(conn, include_seeded=include_seeded)
-    node_ids = {r["id"] for r in node_rows}
-    return {
-        "nodes": [_node_payload(r) for r in node_rows],
-        "edges": [
-            _edge_payload(r)
-            for r in edge_rows
-            if r["source"] in node_ids and r["target"] in node_ids
-        ],
-    }
+    """Return the current evidence-backed graph computed directly from L1 rows."""
+    nodes, edges = build_graph(
+        db.graph_extractions(conn, include_seeded=include_seeded),
+        is_seeded=False,
+    )
+    return _payload(nodes, edges)

@@ -116,3 +116,23 @@ def test_same_day_points_ordered_by_created_at(client):
 
     summaries = [p["summary"] for p in client.get("/insights/mood").json()["points"]]
     assert summaries == ["morning", "evening"]
+
+
+def test_recomputed_entry_replaces_mood_point(client):
+    conn = db.get_or_create_db()
+    entry_id = _seed_point(conn, date="2026-06-07", mood=-1)
+    db.upsert_mood_series(
+        conn,
+        entry_id=entry_id,
+        date="2026-06-07",
+        mood=4,
+        emotions=[{"name": "calm", "intensity": 0.8}],
+        is_seeded=False,
+    )
+    conn.close()
+
+    points = client.get("/insights/mood").json()["points"]
+    assert len(points) == 1
+    assert points[0]["entry_id"] == entry_id
+    assert points[0]["mood"] == 4
+    assert points[0]["emotions"] == [{"name": "calm", "intensity": 0.8}]

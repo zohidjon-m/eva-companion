@@ -1,5 +1,5 @@
 /**
- * Growth-report API — thin fetch wrapper over GET /insights/growth (Phase 14).
+ * Growth-report API — thin fetch wrapper over GET /insights/growth.
  *
  * The report is DESCRIPTIVE by contract (System Design §11/§12): it states what
  * was written across two periods — entry counts, average noted mood, theme shifts
@@ -16,6 +16,24 @@ export type PeriodSummary = {
   /** Average noted mood (−5..+5), or null when no day in the window had a mood. */
   avg_mood: number | null;
   top_themes: { theme: string; count: number }[];
+  open_loops: OpenLoopStats;
+  behaviors: BehaviorStats;
+};
+
+export type EvidenceBucket = { count: number; entries: string[] };
+
+export type OpenLoopStats = {
+  open: EvidenceBucket;
+  updated: EvidenceBucket;
+  resolved: EvidenceBucket;
+  total: number;
+  resolution_rate: number | null;
+};
+
+export type BehaviorStats = {
+  aligned: EvidenceBucket;
+  contradicting: EvidenceBucket;
+  unmatched: EvidenceBucket;
 };
 
 export type GrowthReport = {
@@ -25,6 +43,17 @@ export type GrowthReport = {
   period_b: PeriodSummary;
   mood_delta: { a_avg: number | null; b_avg: number | null; change: number | null; description: string };
   theme_shifts: { emerged: string[]; faded: string[]; continued: string[] };
+  open_loop_delta: {
+    period_a: OpenLoopStats;
+    period_b: OpenLoopStats;
+    resolution_rate_change: number | null;
+  };
+  behavior_delta: {
+    period_a: BehaviorStats;
+    period_b: BehaviorStats;
+    change: { aligned: number; contradicting: number; unmatched: number };
+  };
+  verified_claims: { claim: string; entries: string[] }[];
   /** Observational sentences — descriptive, never a judgment. */
   narrative: string[];
   /** An open question; the user is the interpreter. */
@@ -38,8 +67,8 @@ export type GrowthResponse = GrowthReport | GrowthEmpty;
 
 /**
  * Fetch the growth report. With no explicit windows the backend auto-splits the
- * available history at its midpoint (the demo path). `includeSeeded` lifts the
- * live-only filter. Throws on a transport/HTTP error so the hook can surface it.
+ * available history at its midpoint. `includeSeeded` lifts the live-only filter.
+ * Throws on a transport/HTTP error so the hook can surface it.
  */
 export async function fetchGrowth(includeSeeded: boolean): Promise<GrowthResponse> {
   const params = new URLSearchParams();

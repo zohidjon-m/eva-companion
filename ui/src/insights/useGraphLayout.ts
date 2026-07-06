@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { GraphEdge, GraphNode } from "./graphApi";
 
 /**
- * useGraphLayout — a tiny, dependency-free force-directed layout (Phase 14).
+ * useGraphLayout - a tiny, dependency-free force-directed layout for insights.
  *
  * The app ships fully offline and avoids extra weight (the same reason MoodChart
  * is hand-built), so rather than pull in d3-force or Cytoscape we run a compact

@@ -10,8 +10,8 @@ import { useInsightsMood, type MoodRange } from "./useInsightsMood";
  * InsightsScreen — the Insights surface, now in three blocks (Phase 12 + 14):
  *
  *   • Mood   — the Phase-12 line/area chart (real plumbing: SQL over mood_series).
- *   • Connections — the Phase-14 force-directed knowledge graph (§7.4).
- *   • Looking back — the Phase-14 descriptive growth report (§11), never a verdict.
+ *   - Connections - the R10 force-directed knowledge graph (§7.4).
+ *   - Looking back - the R10 descriptive growth report (§11), never a verdict.
  *
  * A segmented control switches between them so the screen stays calm rather than a
  * long scroll. Each block owns its own data, demo toggle, and empty state, so a

@@ -76,7 +76,7 @@ def test_columns_exact(db, table, cols):
 def test_user_version_stamped(db):
     db_mod, conn = db
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == db_mod.SCHEMA_USER_VERSION == 5
+    assert version == db_mod.SCHEMA_USER_VERSION == 6
 
 
 def test_entries_type_check_constraint(db):
@@ -233,6 +233,39 @@ def test_v4_to_v5_migration_adds_consolidated_flag(db):
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(extractions)")}
     assert "consolidated" in cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db_mod.SCHEMA_USER_VERSION
+
+
+def test_v5_to_v6_migration_dedupes_mood_series_and_adds_unique_index(db):
+    """A v5 db with duplicate mood rows keeps the newest row before indexing."""
+    db_mod, conn = db
+    conn.execute("DROP INDEX IF EXISTS idx_mood_series_entry_id")
+    db_mod.insert_entry(
+        conn,
+        id="e1",
+        date="2026-07-01",
+        type="journal",
+        text="x",
+        word_count=1,
+        created_at="2026-07-01T08:00:00",
+    )
+    conn.execute(
+        "INSERT INTO mood_series (id, entry_id, date, mood, emotions, is_seeded) "
+        "VALUES ('m1', 'e1', '2026-07-01', -2, '[]', 0)"
+    )
+    conn.execute(
+        "INSERT INTO mood_series (id, entry_id, date, mood, emotions, is_seeded) "
+        "VALUES ('m2', 'e1', '2026-07-01', 3, '[]', 0)"
+    )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+
+    db_mod.init_db(conn)
+
+    rows = conn.execute("SELECT id, mood FROM mood_series WHERE entry_id = 'e1'").fetchall()
+    assert [(r["id"], r["mood"]) for r in rows] == [("m2", 3)]
+    indexes = {r["name"]: r for r in conn.execute("PRAGMA index_list(mood_series)")}
+    assert indexes["idx_mood_series_entry_id"]["unique"] == 1
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db_mod.SCHEMA_USER_VERSION
 
 
