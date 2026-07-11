@@ -15,7 +15,7 @@ Access is coarse-grained — one model, one lock — which is exactly the §8 de
 "the heavy work happens where latency doesn't matter."
 
 **Sampling (CLAUDE.md).** Set per request here, not on the server:
-chat uses temp 1.0 / top_p 0.95 / top_k 64; extraction uses temp 0.3. The server's
+chat uses temp 0.7 / top_p 0.95 / top_k 64; extraction uses temp 0.3. The server's
 ``--n_ctx`` is the maximum; per-request budgeting is done via ``max_tokens`` and
 (later) message truncation — never by changing the server flag.
 """
@@ -36,8 +36,11 @@ log = logging.getLogger("eva.llm.client")
 # :11500. Only loopback is contacted, so the privacy net-guard permits it.
 CHAT_URL = f"{server.BASE_URL}/v1/chat/completions"
 
-# Chat sampling (CLAUDE.md): warm, varied companion voice.
-CHAT_TEMPERATURE = 1.0
+# Chat sampling: warm but coherent companion voice. Lowered from 1.0 to 0.7 so a
+# direct question ("am I X?", "what did I say about Y?") gets a reliable answer
+# grounded in the profile/memory instead of a high-variance deflection — the 2B
+# model is close to a coin-flip at temp 1.0. Still warm and non-robotic at 0.7.
+CHAT_TEMPERATURE = 0.7
 CHAT_TOP_P = 0.95
 CHAT_TOP_K = 64
 # Stop generation at the gemma turn boundary. The GGUF's embedded template should

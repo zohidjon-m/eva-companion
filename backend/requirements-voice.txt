@@ -1,0 +1,23 @@
+# Eva backend — VOICE dependencies (optional; install on top of requirements.txt).
+#
+#     pip install -r requirements-voice.txt
+#
+# These are split from the core install because Kokoro pulls in torch (~2 GB).
+# Voice is lazy-loaded on first use (never at startup, per the 8 GB memory
+# budget), and the app runs fine without these — voice endpoints simply report
+# unavailable while text chat / journaling / insights are unaffected.
+
+# Voice in (push-to-talk STT). faster-whisper runs Whisper on CTranslate2
+# (CPU/int8 on Apple Silicon — no Metal backend). It pulls PyAV for audio
+# decoding, so no system ffmpeg is required. Weights (base.en / small.en)
+# download to <vault>/models/whisper on first use (the only permitted STT
+# network call) or out-of-band via scripts/download_whisper_model.py.
+faster-whisper>=1.0,<2
+
+# Voice out (Kokoro TTS). Kokoro synthesizes Eva's replies to 24 kHz speech
+# locally; it pulls torch. The import happens in-process (voice/tts.py),
+# lazy-loaded on the first voiced turn. The sentence queue
+# (voice/sentence_queue.py) splits the reply at sentence boundaries and is
+# pure-Python. Voice weights download once on first use (the only TTS net call)
+# or out-of-band via scripts/download_kokoro_model.py.
+kokoro>=0.9,<1

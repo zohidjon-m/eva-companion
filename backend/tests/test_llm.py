@@ -127,7 +127,7 @@ def test_build_payload_includes_chat_sampling():
     payload = llm_client._build_payload(
         [{"role": "user", "content": "x"}],
         max_tokens=450,
-        temperature=1.0,
+        temperature=0.7,
         top_p=0.95,
         top_k=64,
         stop=None,

@@ -1,5 +1,8 @@
-# Eva backend dependencies — Phase 0 scaffold.
-# Pinned loosely now; later phases add llama/chromadb/whisper/kokoro deps.
+# Eva backend dependencies — CORE (text chat, journaling, memory, insights).
+#
+# Voice (STT/TTS) deps are split out into requirements-voice.txt because Kokoro
+# pulls in torch (~2 GB). Install voice separately only when you need speech:
+#     pip install -r requirements-voice.txt
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 
@@ -24,20 +27,10 @@ python-multipart>=0.0.9
 # launches and supervises it as a subprocess and talks to it over plain HTTP via
 # httpx, so no model library (llama-cpp-python) is needed in this venv.
 
-# Phase 8 — voice in (push-to-talk STT). faster-whisper runs Whisper on
-# CTranslate2 (CPU/int8 on Apple Silicon — no Metal backend). It pulls PyAV for
-# audio decoding, so no system ffmpeg is required. Weights (base.en / small.en)
-# download to <vault>/models/whisper on first use (the only permitted STT network
-# call) or out-of-band via scripts/download_whisper_model.py.
-faster-whisper>=1.0,<2
-
-# Phase 9 — voice out (Kokoro TTS). Kokoro synthesizes Eva's replies to 24 kHz
-# speech locally; it pulls torch. Like the model server, it need not live in the
-# backend's own venv — the import happens in-process (voice/tts.py), lazy-loaded
-# on the first voiced turn, never at startup (§4 memory budget). The sentence
-# queue (voice/sentence_queue.py) splits the reply at §7.5 boundaries and is
-# pure-Python. Voice weights download once on first use (the only TTS net call).
-kokoro>=0.9,<1
+# Voice (STT/TTS) deps live in requirements-voice.txt (faster-whisper + kokoro).
+# They pull torch (~2 GB), so they are kept out of the core install. The app
+# degrades gracefully without them: voice endpoints report unavailable, text
+# chat/journaling/insights are unaffected.
 
 # Test/dev only (Phase 0 socket-guard test uses requests to match the plan).
 # httpx is also the runtime client used by backend/llm/client.py to stream.

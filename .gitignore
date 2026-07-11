@@ -1,6 +1,8 @@
 # --- Python backend ---
+backend/venv/
 backend/.venv/
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -26,6 +28,9 @@ local_vault/
 # --- Model weights (multi-GB; fetched first-run via scripts/download_model_mac.sh) ---
 models/*.gguf
 models/_moved.gguf.bak
+
+# --- Bundled llama.cpp runtime (binaries; fetched via scripts/setup_windows.ps1 or brew) ---
+bin/
 
 # --- Self-test artifacts (scripts/try_eva.py generates these on each run) ---
 scripts/_eva_voice.wav

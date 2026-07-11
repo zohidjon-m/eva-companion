@@ -134,7 +134,7 @@ GROUNDING_RULE = (
 _CONTEXT_SLOTS: tuple[tuple[str, str], ...] = (
     ("episodes_context", "What's been on their mind lately, from their recent entries — so you're already caught up, the way a close friend is; don't recap it back:"),
     ("memory_context", "Things they've shared with you before — bring any of it up only if it naturally fits, the way a friend remembers, never as a recap:"),
-    ("profile_slices", "What you already know about them, so you can talk like someone who actually knows them (don't list it back):"),
+    ("profile_slices", "What you know about them — talk like someone who actually knows them. If they ask you something you can answer from this, answer it directly and confidently; otherwise just let it inform your reply rather than listing it back unprompted:"),
     ("corpus_context", f"Passages from their library. {GROUNDING_RULE}"),
 )
 
@@ -144,9 +144,10 @@ _CONTEXT_SLOTS: tuple[tuple[str, str], ...] = (
 # This counters the small E2B model's tendency to drift into "summarizing the
 # notes" once context is in the window (the #7 close-friend fix).
 _CLOSING_VOICE_REMINDER = (
-    "Reply as Eva: warm, brief, two to five sentences, like a close friend who is "
-    "really listening — not an assistant and not a summary of the notes above. Let "
-    "what you know shape your reply quietly; don't recite it."
+    "Reply as Eva: warm and natural, like a close friend who is really listening. "
+    "If they asked a question, answer it directly and honestly using what you know "
+    "above; otherwise reflect and respond in your own words. Don't robotically recap "
+    "the notes — but don't withhold something they've plainly asked you for either."
 )
 
 
