@@ -1,190 +1,274 @@
 # Eva
 
-A privacy-first **hybrid-provider** desktop AI journaling companion. Tauri
-(Rust shell) + React/Vite frontend + Python FastAPI backend + local
-llama.cpp `llama-server` by default, with opt-in online API providers for
-users who choose them. Privacy is a hard law: no telemetry, no analytics, and
-mode-aware network access. Local mode blocks outbound runtime calls except
-explicit first-run model/voice downloads; online API mode permits only the
-selected provider host.
+**A private AI journaling companion with memory you can inspect, correct, and own.**
 
-> **Status: mixed implementation / V2 realignment.** The repo is past the
-> original scaffold and includes later UI, memory, voice, and provider surfaces,
-> but the V2 memory foundations are being realigned before L3/L4 work resumes.
-> Canonical plan: `docs/IMPLEMENTATION_PLAN_V2.md`. Realignment bridge:
-> `docs/V2_CODEBASE_REALIGNMENT_PLAN.md`. Provider decision:
-> `docs/decisions/2026-07-01-hybrid-llm-provider.md`.
+Eva turns journal entries and conversations into an evolving, evidence-linked
+memory: what matters to you, what has changed, and what is still unresolved.
+It runs a small language model locally by default, keeps your original writing
+in plain Markdown, and lets you correct the profile it builds about you.
 
-## Layout
+Built with **Tauri 2 · React · TypeScript · FastAPI · llama.cpp · SQLite · ChromaDB**.
+Designed for a **MacBook M1 Air with 8 GB RAM**, with optional online providers
+behind the same model interface.
 
+[Architecture](#architecture) · [Engineering decisions](#engineering-decisions) ·
+[Run locally](#run-locally) · [Explore the code](#explore-the-code)
+
+> **Status:** Working prototype in active development. Chat, journaling, document
+> retrieval, profile updates, and insights have implementations in this repository;
+> voice is optional. Model-quality evaluation, target-device benchmarks, and
+> production packaging remain ongoing work.
+
+## What Eva does
+
+| Capability | How it works |
+| --- | --- |
+| **Conversations with continuity** | Streams replies using recent entries, relevant older memories, and selected profile claims. Friend, coach, and mentor modes shape the conversation. |
+| **A journal you own** | Saves full entries as Markdown, supports rich-text editing, and preserves previous versions when an entry changes. |
+| **An editable understanding of you** | Tracks goals, patterns, relationships, and open loops with links to source entries. User corrections become protected anchors. |
+| **Grounded reference answers** | Ingests PDF, Markdown, and text files into a separate library index; retrieves passages with citations for information and advice requests. |
+| **Reflection over time** | Computes mood trends, relationship/theme graphs, and comparisons between periods from extracted journal data. |
+| **Local voice** | Uses faster-whisper for speech input and Kokoro for sentence-by-sentence speech output. Voice dependencies are optional and models load on demand. |
+
+For example, a new entry can resolve an earlier open loop. Background
+consolidation can update its status with a pointer to that entry; later
+conversations can retrieve the updated profile. Editing the supporting entry
+triggers revalidation of affected claims.
+
+## Engineering decisions
+
+Eva's central design choice is to put persistence, aggregation, and mutation
+rules in software. The model handles extraction, interpretation, and language.
+
+- **Preserve writing before inference.** Capture writes Markdown before updating
+  derived stores. Failed extraction or embedding leaves the original entry
+  intact. Stable entry IDs and source hashes support repair and recomputation.
+  See [capture](backend/memory/capture.py) and [vault storage](backend/memory/vault.py).
+- **Constrain memory updates.** The model proposes typed profile operations;
+  deterministic code validates evidence IDs, applies confidence arithmetic,
+  and protects user anchors. A valid source pointer enables inspection;
+  semantic correctness still needs evaluation.
+  See [profile operations](backend/memory/operations.py).
+- **Make listening a control-flow decision.** The conversation engine only
+  retrieves uploaded reference material for information or advice requests.
+  Venting and processing turns can recall personal memories without pulling in
+  library passages. See the [turn pipeline](backend/engine/turn.py).
+- **Budget for a small laptop.** Local inference uses a quantized Gemma 4 E2B
+  model, Metal offload, an 8,192-token server context, and q8_0 KV caches with
+  flash attention. A shared model lock gives queued chat requests priority over
+  background work; an already-running request finishes first.
+  See the [server supervisor](backend/llm/server.py) and [model client](backend/llm/client.py).
+- **Keep provider choice behind one boundary.** Native llama.cpp, existing local
+  OpenAI-compatible servers, and opt-in hosted providers share streaming,
+  completion, and status interfaces. Chat and memory processing use that same
+  boundary. See [provider adapters](backend/llm/providers.py).
+- **Expose what reached the model.** A local context inspector reports intent,
+  retrieval decisions, selected memory, approximate token costs, and the
+  assembled prompt. See the [inspection CLI](backend/eval/run.py).
+
+## Architecture
+
+```mermaid
+flowchart TD
+    UI[React / TypeScript in Tauri] --> API[FastAPI: HTTP + WebSocket]
+    API --> Capture[Capture and revision history]
+    Capture --> Vault[L0: Markdown journals]
+    Capture --> Episodes[L1: SQLite episodes]
+    Episodes --> Index[L2: ChromaDB + local embeddings]
+    Episodes --> Consolidation[Background consolidation]
+    Consolidation --> Profile[L3: Evidence-linked profile]
+    Consolidation --> Views[L4: Insights and digests]
+    Episodes --> Views
+    API --> Turn[Conversation engine]
+    Episodes --> Turn
+    Index --> Turn
+    Profile --> Turn
+    Turn --> Provider[Shared LLM provider interface]
+    Provider --> Local[Default: native llama-server]
+    Provider --> Online[Opt-in: configured API provider]
 ```
-backend/            FastAPI app (Python 3.11)
-  app.py            provider-aware API routes; installs the net guard at import
-  net_guard.py      mode-aware outbound socket guard (privacy hard law)
-  tests/            pytest: health shape + net-guard behavior
-ui/                 React + Vite frontend
-  src/App.tsx       status dot that polls /health
-  src-tauri/        Tauri 2 shell (needs Rust to build — see prerequisites)
-packaging/spike/    PyInstaller sidecar proof (build_spike.sh)
-scripts/            check_net_guard.py (manual privacy smoke test)
-dev.sh              starts backend + frontend together
+
+The memory system has two loops: a conversational **read loop** selects context
+for the current turn; a background **write loop** extracts episodes, revises
+profile claims, and produces digests.
+
+| Layer | Storage | Responsibility |
+| --- | --- | --- |
+| **L0 — Originals** | Markdown day files and revision history | Authoritative journal text, readable without Eva. |
+| **L1 — Episodes** | SQLite | Structured summaries, emotions, events, goals, behaviors, and open loops. |
+| **L2 — Recall** | ChromaDB + FastEmbed | Semantic indexes for journal summaries, episode units, and a separate reference corpus. |
+| **L3 — User model** | `profile.json` + editable `profile.md` | Evidence-linked claims, confidence, status, and protected user corrections. |
+| **L4 — Reflection** | Derived statistics, graph data, and digests | Descriptive views over recorded history. |
+
+Here, **self-evolving memory** means updating external representations while
+model weights stay fixed. Journal-derived indexes can be rebuilt from lower
+layers; human corrections are additional inputs, so preserve profile artifacts
+alongside journal files when backing up the vault.
+
+The [technical paper](docs/EVA_MEMORY_TECHNICAL_PAPER.md) explains the algorithms,
+implementation evidence, limitations, and proposed evaluation protocol.
+
+## Privacy and data ownership
+
+- **Local is the default.** After explicit model/embedding/voice setup, local
+  mode runs without a hosted model API. No telemetry or usage analytics.
+- **Backend network access is guarded.** A socket-level guard blocks
+  non-loopback connections in local mode except an explicitly allowed setup
+  download host. Online mode allows the configured provider host. This is a
+  Python backend control, not an operating-system-wide network sandbox.
+- **Online providers are opt-in.** Choosing one sends model inputs, including
+  any selected journal or profile context, to that provider. Supported adapters
+  include OpenAI-compatible APIs, Anthropic, and Gemini.
+- **Original writing stays accessible.** The default vault is `local_vault/`
+  (override with `EVA_VAULT_DIR`). Journals live under `journal/`; databases
+  and vector indexes are derived representations.
+
+Implementation: [network guard](backend/net_guard.py) ·
+[privacy tests](backend/tests/test_privacy_audit.py) ·
+[provider policy decision](docs/decisions/2026-07-01-hybrid-llm-provider.md).
+
+## Run locally
+
+The primary target is **macOS on Apple Silicon**. Use Python 3.11, Node.js 18+
+with npm, and Homebrew. Rust is required for the native Tauri window; without
+it, the development launcher serves the UI in a browser.
+
+Run the following from the repository root. Dependency installation and model
+downloads require internet access; they happen before offline runtime.
+
+### 1. Install the core dependencies
+
+```sh
+brew install llama.cpp
+python3.11 -m venv backend/.venv
+backend/.venv/bin/python -m pip install -r backend/requirements.txt
+npm --prefix ui ci
 ```
 
-## Prerequisites
+The local provider uses the native **`llama-server` binary only**. The Python
+backend communicates with it over HTTP; no `llama-cpp-python` install is needed.
 
-- **Python 3.11** (backend)
-- **Node 18+ / npm** (frontend)
-- **Rust toolchain** (`cargo`, `rustc`) — required to build/run the **Tauri
-  native window**. Install via <https://rustup.rs>. Without it, `dev.sh` falls
-  back to the Vite dev server in a browser (the backend + UI still work; you
-  just don't get the native window).
-- **PyInstaller** — only needed to re-run the packaging spike.
+### 2. Download local model assets once
 
-### System dependencies for the voice features
+```sh
+backend/.venv/bin/python scripts/download_model.py
+backend/.venv/bin/python scripts/download_embed_model.py
+```
 
-- **espeak-ng** — recommended for **voice out (Kokoro TTS)**. Kokoro's misaki
-  grapheme-to-phoneme step uses it as a fallback for words outside its built-in
-  dictionary; without it, unusual words may be mispronounced. On macOS:
+The LLM download provides `models/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf`.
+The embedding download is required for semantic recall and library ingestion,
+including when using an online LLM provider. Its persistent cache lives under
+the vault's `models/fastembed/` directory.
 
-  ```sh
-  brew install espeak-ng
-  ```
-
-- **ffmpeg is NOT required.** Voice in (faster-whisper) decodes the browser's
-  recording (webm/opus on Chrome, mp4/aac in the macOS Tauri webview) via
-  **PyAV**, which bundles its own ffmpeg libraries. You do not need a system
-  ffmpeg install.
-
-## Run (development)
+### 3. Launch Eva
 
 ```sh
 ./dev.sh
 ```
 
-This creates the backend venv on first run, starts the backend on
-`http://127.0.0.1:8000`, and launches the frontend — the Tauri window if Rust
-is installed, otherwise Vite at `http://localhost:1420`. The status dot turns
-green when the backend answers `/health`.
+The launcher starts the backend at `http://127.0.0.1:8000` and the Tauri window
+(or Vite at `http://localhost:1420`). It sets `EVA_START_LLAMA=1` so the backend
+launches and supervises `llama-server` on `127.0.0.1:11500`; you do not need to
+start the model server separately. Check `http://127.0.0.1:8000/health` for readiness.
 
-### Run the halves manually
+To use another provider, open Eva's AI settings and explicitly select it.
+Online LLM mode does not require the local GGUF download.
 
-Backend:
+<details>
+<summary><strong>Optional: enable local voice</strong></summary>
 
-```sh
-cd backend
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --host 127.0.0.1 --port 8000 --reload
-curl http://localhost:8000/health      # -> {"status":"ok","model_present":false,...}
-```
-
-Frontend:
+Install the separate voice dependencies and download their assets:
 
 ```sh
-cd ui
-npm install
-npm run dev                            # http://localhost:1420
-# or, with Rust installed, the native window:
-npm run tauri dev
+brew install espeak-ng
+backend/.venv/bin/python -m pip install -r backend/requirements-voice.txt
+backend/.venv/bin/python scripts/download_whisper_model.py all
+backend/.venv/bin/python scripts/download_kokoro_model.py
 ```
 
-## First-run local model & voice assets (one-time, needs internet)
+Voice models load on demand. Keeping them out of the core install avoids the
+additional PyTorch dependency for text-only use. Audio decoding uses PyAV;
+a separate system ffmpeg installation is unnecessary.
 
-In local AI mode, Eva runs offline at runtime after setup. The backend forces
-the HuggingFace stack offline and the net guard blocks non-allowed outbound
-traffic, so local model weights must be downloaded **once** up front with these
-out-of-band scripts. Online API mode skips the local LLM download, but local
-embedding and voice assets are still needed for features that use them. Each
-script writes into the vault (`local_vault/models/…`) or the HuggingFace cache,
-so the weights survive offline use:
+</details>
+
+<details>
+<summary><strong>Windows source development</strong></summary>
+
+Windows has setup and launcher scripts; Apple Silicon remains the primary
+hardware target. With Python 3.11 and Node.js/npm installed, run from the repo
+root in PowerShell:
+
+```powershell
+py -3.11 -m venv backend/.venv
+.\backend\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt
+npm --prefix ui ci
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
+.\backend\.venv\Scripts\python.exe scripts/download_embed_model.py
+powershell -ExecutionPolicy Bypass -File .\dev.ps1
+```
+
+The setup script downloads the GGUF and native llama.cpp runtime. Native Tauri
+development also needs Rust and its Windows build prerequisites; otherwise the
+launcher uses Vite in the browser.
+
+</details>
+
+## Verification and inspection
+
+The backend includes tests for persistence, extraction, retrieval, profile
+operations, consolidation, provider behavior, privacy controls, and failure
+handling. Some checks mock the model; passing them does not establish response
+quality or target-device performance.
+
+From the repository root on macOS:
 
 ```sh
-cd backend && source .venv/bin/activate     # the scripts use the backend venv
+# Backend tests
+(cd backend && .venv/bin/python -m pytest -q --basetemp ../.pytest-tmp)
 
-# 1. The LLM (Gemma 4 E2B GGUF) — see scripts/download_model.py
-python ../scripts/download_model.py
+# TypeScript check and production frontend build
+npm --prefix ui run build
 
-# Windows source/dev fallback: downloads the local model and llama.cpp runtime
-powershell -ExecutionPolicy Bypass -File ..\scripts\setup_windows.ps1
+# Privacy smoke test: loopback allowed, external connection blocked
+backend/.venv/bin/python scripts/check_net_guard.py
 
-# 2. Embedding model (bge-small) — REQUIRED for Library upload + recall.
-#    Without it, uploading a PDF/txt/md fails with "embedding model isn't set up".
-python ../scripts/download_embed_model.py
-
-# 3. Voice in (faster-whisper STT weights). Downloads the size(s) you use.
-python ../scripts/download_whisper_model.py all        # base.en + small.en
-
-# 4. Voice out (Kokoro TTS weights + af_heart voice + spaCy en_core_web_sm).
-#    Without it, the app shows "Could not load Eva's voice (Kokoro)".
-python ../scripts/download_kokoro_model.py
+# Inspect a turn without generating a reply; uses your local vault
+(cd backend && .venv/bin/python -m eval.run \
+  --inspect "I have been feeling overwhelmed lately" --intent vent)
 ```
 
-**Python packages for voice** (in `backend/requirements.txt`, installed by
-`pip install -r requirements.txt`): `faster-whisper` (STT, pulls PyAV) and
-`kokoro` (TTS, pulls torch). If voice input returns *"Could not read that
-recording"*, confirm `faster-whisper` actually installed:
-`backend/.venv/bin/python -c "import faster_whisper, av"`.
+On Windows, run the backend suite from `backend/` with
+`.\.venv\Scripts\python.exe -m pytest -q --basetemp ..\.pytest-tmp`.
+Add `--model` to the inspector to also generate a reply using the selected
+provider. Inspector output can contain private journal context.
 
-> Why these are separate scripts: fastembed defaults to caching in the **system
-> temp dir**, which macOS purges — so the embedding model is pinned into
-> `local_vault/models/fastembed` instead, and re-run script (2) if a corpus
-> upload ever starts failing after a reboot.
+## Explore the code
 
-## Tests & checks
+| Start here | What to look for |
+| --- | --- |
+| [Conversation engine](backend/engine/turn.py) | Intent classification, concurrent context assembly, retrieval gates, and streaming orchestration. |
+| [Memory operations](backend/memory/operations.py) | Validated profile mutations, evidence requirements, confidence decay, and anchor protection. |
+| [Consolidation](backend/memory/consolidate.py) | Nightly/weekly processing, claim revalidation, and temporal digests. |
+| [Retrieval](backend/memory/retrieval.py) | Recent episodes, relevance/recency scoring, and reference citations. |
+| [Provider adapters](backend/llm/providers.py) | A common contract across local and hosted model APIs. |
+| [React UI](ui/src) | Chat, journal editor, profile evidence, library, insights, and settings. |
+| [Backend tests](backend/tests) | Executable checks of storage, memory rules, network policy, and failure paths. |
 
-```sh
-# backend unit tests (POSIX)
-cd backend && source .venv/bin/activate && python -m pytest -q --basetemp ../.pytest-tmp
+For a deeper review, read the [memory systems paper](docs/EVA_MEMORY_TECHNICAL_PAPER.md)
+and [evaluation design](docs/EVAL_HARNESS_DESIGN.md). The
+[V2 implementation plan](docs/IMPLEMENTATION_PLAN_V2.md) and
+[realignment notes](docs/V2_CODEBASE_REALIGNMENT_PLAN.md) record the development
+sequence; their phase snapshots are historical rather than a current feature inventory.
 
-# backend unit tests (Windows PowerShell)
-cd backend; .\.venv\Scripts\python.exe -m pytest -q --basetemp ..\.pytest-tmp
+## Current boundaries
 
-# manual privacy check: loopback allowed, the open web blocked
-python ../scripts/check_net_guard.py
-
-# frontend build (requires Node/npm and installed ui/node_modules)
-cd ui && npm ci && npm run build
-
-# packaging spike: freeze a FastAPI sidecar and prove it serves HTTP
-PYTHON=backend/.venv/bin/python bash packaging/spike/build_spike.sh
-```
-
-## Demo day (Phase 15)
-
-Three entrypoints get you from any state to a presentable demo, plus the
-beat-by-beat script:
-
-```sh
-# 1. Reset the vault to the known demo state (backs up real data first).
-#    Seeds ~3 weeks of mood + the knowledge graph + the L3 profile + the demo
-#    book; preserves models/ and settings.json. Prints READY / NOT READY.
-backend/.venv/bin/python scripts/demo_reset.py --yes
-
-# 2. Prove every failure mode fails soft (model down, over-cap upload/audio,
-#    rapid-fire, offline guard). Prints a PASS/FAIL report; CI form is
-#    backend/tests/test_failure_drills.py.
-backend/.venv/bin/python scripts/demo_drills.py
-
-# 3. Launch in demo mode (optionally reset first), then follow the current V2
-#    plan and realignment notes. A refreshed DEMO_SCRIPT.md is deferred to the
-#    final hardening/demo phase.
-./run_demo.sh --reset
-```
-
-- **`docs/IMPLEMENTATION_PLAN_V2.md`** — the canonical V2 build plan.
-- **`docs/V2_CODEBASE_REALIGNMENT_PLAN.md`** — the bridge from this repo state
-  to the V2 target.
-- **`packaging/build_macos.sh`** — builds the `.app`/`.dmg` (needs Rust/`cargo`).
-- **`packaging/CLEAN_MACHINE_CHECKLIST.md`** — verify the bundle cold on a fresh
-  macOS account, twice (one run Wi-Fi off), one deliberate failure per category.
-
-## The network guard
-
-`backend/net_guard.py` monkeypatches `socket.connect`/`connect_ex` so any
-outbound connection to a non-loopback host raises `OutboundBlocked` and is
-logged unless the active provider mode explicitly allows it. Local mode permits
-loopback plus the single first-run download host named by `EVA_ALLOW_HOST`
-(pre-resolved to its IPs at startup). Online API mode permits only the selected
-provider host. The guard is installed the moment `backend/app.py` is imported —
-it is **not** deferred to a later phase. The provider/network status UI reports
-this mode-aware policy.
+- **Evaluation:** The context inspector is implemented. Controlled comparisons
+  of recall, claim accuracy, and longitudinal personalization remain to be run.
+  The technical paper records existing engineering validation separately.
+- **Hardware:** The 8 GB M1 Air is the design target. Peak memory, swap activity,
+  and end-to-end latency need measurement under the full workload, including voice.
+- **Distribution:** The Rust shell is thin and packaging scripts/spikes exist.
+  Production backend-sidecar integration, signing, and clean-machine verification
+  remain release work.
+- **Language:** English only.
