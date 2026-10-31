@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 
 # Force the embedding stack offline BEFORE fastembed/huggingface_hub import, so a
 # cached model is used and no outbound call is attempted at runtime. The one-time
@@ -60,6 +61,8 @@ _journals = None
 _episodes = None
 _corpus = None
 _embedder = None
+_client_lock = threading.Lock()
+_embedder_lock = threading.Lock()
 
 
 def chroma_dir():
@@ -108,14 +111,16 @@ def _embed(texts: list[str]) -> list[list[float]]:
     function API, which has shifted between releases.
     """
     global _embedder
-    if _embedder is None:
-        from fastembed import TextEmbedding
+    # Recall, profile scoring, and library lookup can all arrive on a cold turn.
+    # Build one ONNX session rather than loading one model per racing thread.
+    with _embedder_lock:
+        if _embedder is None:
+            from fastembed import TextEmbedding
 
-        # Pin the cache into the vault (not fastembed's volatile temp default) so
-        # the model is durable across reboots/temp cleanups — see fastembed_cache_dir().
-        cache = fastembed_cache_dir()
-        cache.mkdir(parents=True, exist_ok=True)
-        _embedder = TextEmbedding(model_name=EMBED_MODEL, cache_dir=str(cache))
+            # Keep weights in the persistent vault cache, never the temp directory.
+            cache = fastembed_cache_dir()
+            cache.mkdir(parents=True, exist_ok=True)
+            _embedder = TextEmbedding(model_name=EMBED_MODEL, cache_dir=str(cache))
     return [list(map(float, v)) for v in _embedder.embed(list(texts))]
 
 
@@ -170,13 +175,16 @@ def _get_client():
     the vault, so they share one client.
     """
     global _client
-    if _client is None:
-        import chromadb
+    # Chroma's shared Rust system must finish starting before another caller
+    # can request a client for that store (otherwise its bindings may be absent).
+    with _client_lock:
+        if _client is None:
+            import chromadb
 
-        path = chroma_dir()
-        path.mkdir(parents=True, exist_ok=True)
-        _client = chromadb.PersistentClient(path=str(path))
-        log.info("opened ChromaDB persistent client at %s", path)
+            path = chroma_dir()
+            path.mkdir(parents=True, exist_ok=True)
+            _client = chromadb.PersistentClient(path=str(path))
+            log.info("opened ChromaDB persistent client at %s", path)
     return _client
 
 

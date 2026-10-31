@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 import app as app_mod
@@ -54,9 +56,10 @@ def _stub_capture(monkeypatch):
 
 
 # ── server: launch command & status ─────────────────────────────────────────
-def test_binary_command_has_translated_flags():
+@pytest.mark.parametrize("profile", ["mac-metal", "win-cuda"])
+def test_binary_command_has_translated_flags(profile):
     # The preferred launcher: native llama-server with the binary's flag names.
-    cmd = llm_server.binary_command("/opt/homebrew/bin/llama-server", profile="mac-metal")
+    cmd = llm_server.binary_command("/opt/homebrew/bin/llama-server", profile=profile)
     assert cmd[0] == "/opt/homebrew/bin/llama-server"
     assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"     # all layers on Metal
     assert cmd[cmd.index("--ctx-size") + 1] == "8192"
@@ -68,6 +71,15 @@ def test_binary_command_has_translated_flags():
     assert cmd[cmd.index("--port") + 1] == "11500"
     assert cmd[cmd.index("--model") + 1].endswith("gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf")
     assert "--chat_format" not in cmd
+
+
+def test_windows_cpu_profile_keeps_gpu_offload_disabled():
+    """Keep the CPU fallback usable on Windows PCs without a CUDA runtime."""
+    cmd = llm_server.binary_command("llama-server.exe", profile="win-cpu")
+    assert cmd[cmd.index("--n-gpu-layers") + 1] == "0"
+    assert cmd[cmd.index("--ctx-size") + 1] == "8192"
+    assert "--jinja" in cmd
+    assert cmd[cmd.index("--reasoning") + 1] == "off"
 
 
 def test_resolve_and_launch_use_binary(monkeypatch, tmp_path):

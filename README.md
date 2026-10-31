@@ -11,13 +11,27 @@ Built with **Tauri 2 · React · TypeScript · FastAPI · llama.cpp · SQLite ·
 Designed for a **MacBook M1 Air with 8 GB RAM**, with optional online providers
 behind the same model interface.
 
-[Architecture](#architecture) · [Engineering decisions](#engineering-decisions) ·
+[Demo](#see-eva-in-action) · [Architecture](#architecture) · [Engineering decisions](#engineering-decisions) ·
 [Run locally](#run-locally) · [Explore the code](#explore-the-code)
 
 > **Status:** Working prototype in active development. Chat, journaling, document
 > retrieval, profile updates, and insights have implementations in this repository;
 > voice is optional. Model-quality evaluation, target-device benchmarks, and
 > production packaging remain ongoing work.
+
+## See Eva in action
+
+![Local Gemma combining personal context with passages from an uploaded book](docs/images/showcase/book-advice.jpg)
+
+*A fictional persona, real local inference. Eighteen authored journal entries
+flow through extraction, profile updates, and insights; later conversations
+use the resulting memory and an uploaded reference library.*
+
+Read the [illustrated walkthrough](docs/SHOWCASE.md) for the before-and-after
+profile, original evidence, connections graph, mood chart, and reproducible
+demo. The [recorded run](docs/showcase/run-record.json) links observed memory
+changes to their source entries. The Windows source build was verified with
+**433 passing backend tests**; target-device benchmarks remain separate work.
 
 ## What Eva does
 
@@ -34,6 +48,19 @@ For example, a new entry can resolve an earlier open loop. Background
 consolidation can update its status with a pointer to that entry; later
 conversations can retrieve the updated profile. Editing the supporting entry
 triggers revalidation of affected claims.
+
+## The challenge: continuity with a small local model
+
+A small model has a limited working context. A useful companion still needs to
+remember older experiences, update an unresolved concern when new evidence
+arrives, and let the user correct an interpretation.
+
+Eva implements that memory outside the model: durable originals, structured
+episodes, semantic recall, evidence-linked profile operations, and derived
+views. A fast read loop selects context for conversation; a background write
+loop revises memory under deterministic validation rules. Model weights stay
+fixed. The engineering work lies in persistence, retrieval, update policy,
+concurrency, and making the result inspectable.
 
 ## Engineering decisions
 

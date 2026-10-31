@@ -106,6 +106,16 @@ _ADVICE_PHRASES: tuple[str, ...] = (
     "would it be wise",
 )
 
+# Imperative requests can omit a question mark or put the source first. Match
+# the request clause, not a narrated suggestion such as "Maya suggested a walk".
+_ADVICE_REQUEST = re.compile(
+    r"(?:^|[.!?]\s+)"
+    r"(?:(?:using|based on|drawing on)\s+[^,\n]+,\s*)?"
+    r"(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
+    r"(?:suggest|recommend)\b",
+    re.IGNORECASE,
+)
+
 # Stuck-ness markers: the person is at a loss, but it is genuinely unclear whether
 # they are asking Eva to help or just naming the feeling. These are NOT resolved
 # by the rules — they hand off to the model fallback. "I don't know what to do"
@@ -244,6 +254,8 @@ def classify_rules(text: str) -> str | None:
     words = normalized.split()
 
     # 1. Explicit ask for guidance wins outright.
+    if _ADVICE_REQUEST.search(text):
+        return ASK_ADVICE
     for phrase in _ADVICE_PHRASES:
         if phrase in normalized:
             return ASK_ADVICE

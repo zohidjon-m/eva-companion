@@ -71,6 +71,26 @@ def test_advice_requests_are_ask_advice(text):
     assert classifier.classify_rules(text) == classifier.ASK_ADVICE
 
 
+@pytest.mark.parametrize("text", [
+    "Using How to Live on 24 Hours a Day from my library, suggest a small evening routine.",
+    "Please recommend a small next step for tomorrow.",
+    "Based on Meditations, could you suggest a way to prepare calmly?",
+])
+def test_imperative_advice_requests_retrieve(text):
+    """Retrieve library passages when a direct advice request has no question opener."""
+    assert classifier.classify_rules(text) == classifier.ASK_ADVICE
+
+
+@pytest.mark.parametrize("text", [
+    "Maya suggested a walk and I felt relieved.",
+    "I would suggest a different plan to Maya, but I stayed quiet.",
+    "Please don't suggest anything; I just need to vent.",
+])
+def test_narrated_or_declined_suggestions_stay_listen_first(text):
+    """Keep descriptions and explicit requests to vent outside corpus retrieval."""
+    assert classifier.classify_rules(text) == classifier.VENT
+
+
 @pytest.mark.parametrize(
     "text",
     [

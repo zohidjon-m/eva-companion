@@ -191,8 +191,12 @@ def _scheduler_autostart() -> bool:
     the local-AI launcher already sets ``EVA_START_LLAMA``; other launches (online
     mode, manual) opt in with ``EVA_START_SCHEDULER`` — and stays off under a
     TestClient import (neither is set), so tests drive the cadences explicitly.
+    An explicit ``EVA_START_SCHEDULER=0`` lets fixture tools own consolidation
+    while retaining backend supervision of the local model process.
     """
-    return _autostart_enabled() or _truthy_env("EVA_START_SCHEDULER")
+    if "EVA_START_SCHEDULER" in os.environ:
+        return _truthy_env("EVA_START_SCHEDULER")
+    return _autostart_enabled()
 
 
 def _consolidate_http_enabled() -> bool:
@@ -261,6 +265,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "tauri://localhost",
+        "http://tauri.localhost",
     ],
     allow_methods=["*"],
     allow_headers=["*"],

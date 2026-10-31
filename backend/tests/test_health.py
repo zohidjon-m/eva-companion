@@ -30,3 +30,15 @@ def test_health_reports_download_hint_when_model_missing(monkeypatch):
     body = r.json()
     assert body["model_present"] is False
     assert "download_model.py" in body["model"]["hint"]
+
+
+def test_health_allows_packaged_windows_origin():
+    """Let the Windows Tauri webview reach its local backend after packaging."""
+    response = client.get("/health", headers={"Origin": "http://tauri.localhost"})
+    assert response.headers["access-control-allow-origin"] == "http://tauri.localhost"
+
+
+def test_health_does_not_allow_an_external_web_origin():
+    """Keep the desktop-origin fix from allowing arbitrary websites to read Eva."""
+    response = client.get("/health", headers={"Origin": "https://unrelated.example"})
+    assert "access-control-allow-origin" not in response.headers

@@ -22,8 +22,8 @@ report. The plan's five categories:
 It runs entirely in-process via FastAPI's TestClient against a *throwaway* vault
 (``EVA_VAULT_DIR`` → a temp dir), so it never touches the user's real data and
 needs no running server. The Gemma GGUF lives under ``models/`` (not the vault),
-so "model present, server down" is the natural state here; "model file missing" is
-simulated by pointing the path at nothing for one drill.
+so the harness supplies a temporary model-file marker and explicitly simulates
+an unavailable model transport. It never starts or depends on a live model server.
 
 Usage:
     backend/.venv/bin/python scripts/demo_drills.py        # run + print report
@@ -38,6 +38,7 @@ import sys
 import tempfile
 from collections import namedtuple
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,10 +115,9 @@ def drill_model_file_missing(client, app_mod) -> Drill:
 def drill_model_server_down(client, app_mod) -> Drill:
     """Model file present but server down → graceful 'model_error', socket survives.
 
-    The Gemma file is on disk (under models/) but no llama_cpp server is listening
-    on :11500, so the stream call gets a connection error — which the chat handler
-    turns into an error frame instead of letting it escape. We then send a second
-    turn on a fresh socket to confirm the backend is still serving.
+    The harness makes the model file present and injects a transport failure,
+    independent of any real server on :11500. The chat handler must translate
+    that failure into an error frame and keep serving the health endpoint.
     """
     frames = _send_turn(client, "I had a long day today")
     types = [f.get("type") for f in frames]
@@ -230,30 +230,47 @@ def run_all() -> list[Drill]:
     Importable so ``tests/test_failure_drills.py`` can assert on the same checks
     the demo-day report shows — one source of truth for "the drills pass".
     """
-    _setup_env()
-    from fastapi.testclient import TestClient
-    import app as app_mod
-
     results: list[Drill] = []
-    with TestClient(app_mod.app) as client:
-        for fn in _AUTOMATED:
-            try:
-                results.append(fn(client, app_mod))
-            except Exception as exc:  # a drill that itself errors is a failure
-                results.append(Drill(fn.__name__, False, f"drill raised: {exc!r}"))
+    with patch.dict(os.environ, {"EVA_START_LLAMA": "0", "EVA_START_SCHEDULER": "0"}):
+        tmp = _setup_env()
+        present_model = tmp / "fixture.gguf"
+        present_model.write_bytes(b"failure-drill marker; never loaded")
+        from fastapi.testclient import TestClient
+        import app as app_mod
 
-    # The chat drills called the real stream_chat, which acquired the module-global
-    # asyncio lock in llm.client on the TestClient's event loop. That loop is now
-    # closed, leaving the lock bound to a dead loop — which would break any later
-    # code that uses it on a different loop (e.g. the in-suite test_llm lock test).
-    # Rebind it to a fresh, unbound lock so we leave global state clean. Harmless in
-    # the standalone-script case (the process exits straight after).
+        with (
+            patch.object(app_mod.llm_server, "MODEL_PATH", present_model),
+            patch.object(app_mod.llm_providers, "selected_provider_id", return_value="local_llamacpp"),
+            patch.object(app_mod, "_ensure_local_llama_running", return_value=None),
+            patch.object(app_mod._llama, "is_running", return_value=True),
+            patch.object(app_mod.llm_client, "stream_chat", _offline_stream),
+            patch.object(app_mod.llm_client, "complete_chat", _offline_completion),
+            TestClient(app_mod.app) as client,
+        ):
+            for fn in _AUTOMATED:
+                try:
+                    results.append(fn(client, app_mod))
+                except Exception as exc:  # a drill that itself errors is a failure
+                    results.append(Drill(fn.__name__, False, f"drill raised: {exc!r}"))
+
+    # Keep client state unbound between TestClient event loops.
     import asyncio
     from llm import client as _llm_client
 
     _llm_client._model_lock = asyncio.Lock()  # noqa: SLF001 — deliberate isolation reset
     _llm_client._chat_waiting = 0  # noqa: SLF001
     return results
+
+
+async def _offline_stream(*args, **kwargs):
+    """Simulate a failed model connection without contacting a real inference server."""
+    raise ConnectionError("Simulated model server unavailable")
+    yield ""  # pragma: no cover — retain the streaming async-generator interface.
+
+
+async def _offline_completion(*args, **kwargs):
+    """Keep intent fallback and background extraction inside the same simulated outage."""
+    raise ConnectionError("Simulated model server unavailable")
 
 
 def main() -> int:

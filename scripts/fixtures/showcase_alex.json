@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "fictional": true,
+  "persona": "Alex Morgan",
+  "description": "Fictional early-career software engineer. Raw journal text is authored for a portfolio demonstration; extraction, retrieval, profile operations, and analytics must be computed by Eva.",
+  "books": [
+    {
+      "title": "Meditations",
+      "author": "Marcus Aurelius",
+      "source": "https://www.gutenberg.org/ebooks/2680",
+      "text_url": "https://www.gutenberg.org/ebooks/2680.txt.utf-8"
+    },
+    {
+      "title": "How to Live on 24 Hours a Day",
+      "author": "Arnold Bennett",
+      "source": "https://www.gutenberg.org/ebooks/2274",
+      "text_url": "https://www.gutenberg.org/ebooks/2274.txt.utf-8"
+    }
+  ],
+  "entries": [
+    {
+      "key": "introduction",
+      "stage": "baseline",
+      "days_ago": 34,
+      "title": "A smaller plan for a difficult month",
+      "text": "My name is Alex Morgan. I'm an early-career software engineer preparing for interviews while finishing a small portfolio project. I value curiosity, keeping promises, and being present for people. Lately I have been treating every free hour as another chance to catch up. I want to finish my portfolio project, practice interviews three evenings a week, and run twice a week. I also want to stop checking job boards in bed. Tonight I feel anxious and scattered. My friend Maya offered to help me practice, but I haven't replied because I feel embarrassed about how unprepared I am."
+    },
+    {
+      "key": "late-night-search",
+      "stage": "baseline",
+      "days_ago": 32,
+      "title": "The job boards took the whole evening",
+      "text": "I planned to finish the portfolio project's export feature after dinner. Instead I checked job boards, compared my progress with strangers, and kept scrolling until 1:30 am. I slept badly and skipped my morning run. Interview preparation felt impossible with a tired head. This is the third time this week that late-night job searching has displaced both sleep and actual practice. I feel frustrated and disappointed. Maya sent a kind follow-up about a mock interview. I still owe her an answer."
+    },
+    {
+      "key": "first-practice",
+      "stage": "baseline",
+      "days_ago": 30,
+      "title": "Knowing the code and explaining it are different",
+      "text": "I did a practice interview on my own. I could solve the problem slowly, but explaining my reasoning out loud was much harder than coding. I froze when I tried to describe the tradeoffs. I felt discouraged afterward and opened another tutorial instead of practicing again. I worked late on the portfolio project, missed dinner with my sister Leah, and slept after midnight. I need to stop using more preparation as a way to avoid being seen learning. I want to ask Maya for a thirty-minute mock interview this week."
+    },
+      {
+      "key": "reading-start",
+      "stage": "baseline",
+      "days_ago": 28,
+      "title": "Reading before another tutorial",
+      "text": "I started reading Meditations by Marcus Aurelius and How to Live on 24 Hours a Day by Arnold Bennett. I am interested in doing the work within my control and using a modest amount of time deliberately. I don't want to turn those books into another impossible productivity standard. My actual problem is that I make an enormous plan, feel behind, and avoid starting. Tonight I wrote down one concrete action: spend twenty-five minutes explaining a project decision out loud, then stop. I am still worried about interviews, but a small plan feels more possible."
+    },
+    {
+      "key": "missed-run",
+      "stage": "baseline",
+      "days_ago": 26,
+      "title": "Another promise I made too large",
+      "text": "I scheduled interview preparation, a long run, and three portfolio tasks into one evening. I completed none of them and stayed up comparing my resume with other people's resumes. I feel tired and ashamed of how quickly I abandon my own plans. My sister Leah said I sound like I am managing a machine rather than caring for a person. She offered a Sunday walk. I said yes. I still need to reply to Maya and choose a time for our first mock interview."
+    },
+    {
+      "key": "accept-help",
+      "stage": "baseline",
+      "days_ago": 24,
+      "title": "I finally replied to Maya",
+      "text": "I replied to Maya and admitted that I was nervous about a mock interview. She said the point is practice, not proving I already know everything. We booked a thirty-minute session for Saturday. I felt relieved after sending the message. I also put my phone charger in the kitchen and spent twenty-five minutes finishing one portfolio test before bed. This did not fix the whole job search, but it was a real evening of work and I went to sleep before midnight. The open question is whether I will actually attend Saturday's practice instead of cancelling."
+    },
+    {
+      "key": "first-mock",
+      "stage": "adjustment",
+      "days_ago": 22,
+      "title": "The mock interview happened",
+      "text": "I attended the mock interview with Maya. I stumbled over the first answer, paused, and tried again. Her feedback was specific: explain the problem first, name the constraints, then describe the decision. We laughed at a bug in my example and the embarrassment passed. I feel proud that I showed up. The question about attending the first mock interview is resolved. Maya and I agreed to practice again next Saturday. I am beginning to see that asking for help makes interview preparation easier rather than exposing some permanent weakness."
+    },
+    {
+      "key": "small-routine",
+      "stage": "adjustment",
+      "days_ago": 20,
+      "title": "A short run and one finished task",
+      "text": "I took a twenty-minute run before work, then completed one portfolio task after dinner. I practiced explaining the export feature for twenty-five minutes and stopped when the timer ended. My phone stayed in the kitchen at bedtime. I slept better and felt calmer the next morning. The smaller plan is working more reliably than the ambitious nightly schedule. I still want to run twice a week, but the aim is consistency and clear thinking, not faster times. I am grateful for Maya's patient feedback and Leah's reminder to leave room for a life."
+    },
+    {
+      "key": "setback",
+      "stage": "adjustment",
+      "days_ago": 18,
+      "title": "A rejection and an old habit",
+      "text": "A rejection email arrived today and I spent an hour refreshing job boards. I felt disappointed and briefly convinced that the portfolio project was pointless. I skipped the planned run. This was a setback, but I noticed the scrolling before it consumed the whole night. I texted Maya, closed the laptop, and cooked dinner. I still slept before midnight. Rejection makes me want to compare myself with everyone else; talking to a friend and choosing one small next task helps me return to what I can actually do."
+    },
+    {
+      "key": "family-walk",
+      "stage": "adjustment",
+      "days_ago": 16,
+      "title": "An afternoon that did not need to be productive",
+      "text": "Leah and I took our Sunday walk. I left my phone in my bag and told her what had been difficult about the job search. She did not try to turn it into a lesson. We talked about her garden and made dinner afterward. I felt connected and lighter. I had been treating time with family as something I could earn only after finishing enough work. I want to keep Sunday afternoon available for Leah instead of automatically filling it with interview preparation. My relationships matter alongside my engineering goals."
+    },
+    {
+      "key": "project-review",
+      "stage": "adjustment",
+      "days_ago": 14,
+      "title": "Showing the unfinished project",
+      "text": "I showed Maya the portfolio project's export feature and its tests. Instead of adding more features, I asked what was unclear. She found two confusing labels and one missing failure case. I fixed those in a focused evening and practiced explaining why I chose Markdown export. I feel more confident when I can show a concrete tradeoff than when I memorize interview phrases. The remaining project goal is to publish the finished README and a short demo next week. Two short runs this week also helped my sleep."
+    },
+    {
+      "key": "weekly-mock",
+      "stage": "adjustment",
+      "days_ago": 12,
+      "title": "Practice started to feel ordinary",
+      "text": "Maya and I completed our second mock interview. This time I explained the constraints before proposing a solution, and I recovered after one wrong assumption. I am still nervous, but the nerves no longer mean I must avoid the conversation. We will keep a weekly practice session. I ran twice this week and left my phone out of the bedroom on five nights. I feel quietly encouraged. My goal has changed from sounding flawless to making my reasoning understandable and asking a clear question when I get stuck."
+    },
+    {
+      "key": "project-shipped",
+      "stage": "current",
+      "days_ago": 10,
+      "title": "The portfolio project is published",
+      "text": "I published the portfolio project's finished README, screenshots, and short demo today. The export feature and failure cases are covered, and Maya successfully followed the setup instructions. The goal of finishing and publishing this project is achieved. I feel relieved and proud. I could keep adding features forever, but I want to spend the next week practicing how to explain the decisions I already made. I celebrated with a short run and dinner with Leah instead of opening job boards."
+    },
+    {
+      "key": "protect-rest",
+      "stage": "current",
+      "days_ago": 8,
+      "title": "Rest is part of the plan",
+      "text": "I was tempted to schedule interview practice every evening now that the portfolio project is published. I chose three focused sessions instead, leaving Friday free and keeping Sunday afternoon for Leah. I feel steady rather than frantic. Two short runs and keeping the phone in the kitchen continue to help my sleep. I do not want advice that treats every spare minute as a productivity problem. I want sustainable progress, honest feedback, and enough energy to be present for people."
+    },
+    {
+      "key": "interview-booked",
+      "stage": "current",
+      "days_ago": 6,
+      "title": "A real interview is on the calendar",
+      "text": "An engineering team invited me to a technical interview next week. I felt excited and anxious at the same time. I booked another mock interview with Maya and selected two portfolio decisions to explain: preserving source data and testing failure behavior. I am preparing in twenty-five-minute blocks instead of staying up late. The new open loop is preparing my project walkthrough for next week's interview. I want to explain what I built, why the tradeoffs mattered, and what I would measure next."
+    },
+    {
+      "key": "not-linear",
+      "stage": "current",
+      "days_ago": 4,
+      "title": "A difficult day did not erase the month",
+      "text": "I slept poorly after worrying about the upcoming interview and had a frustrating practice session. I felt anxious and snapped at a small coding mistake. I took a walk instead of adding another late-night session, then asked Maya one specific question about the walkthrough. Her answer helped. Progress has not been a straight line: rejection and uncertainty still affect me. The difference is that I now return to the small routine sooner, and I don't need to cancel dinner or sacrifice the whole night's sleep to feel that I am trying."
+    },
+    {
+      "key": "walkthrough-ready",
+      "stage": "current",
+      "days_ago": 2,
+      "title": "The walkthrough is ready",
+      "text": "Maya listened to my project walkthrough from beginning to end. I explained the problem, the architecture, why original writing stays independent of indexes, and which quality claims still need evaluation. She could follow it without seeing my code first. The walkthrough preparation is finished and the slides are ready, so that open loop is resolved. I feel prepared, though still nervous about the interview itself. I kept my evening free, called Leah, and went to bed on time."
+    },
+    {
+      "key": "reflection",
+      "stage": "current",
+      "days_ago": 1,
+      "title": "What actually changed",
+      "text": "Looking back over this month, I did finish and publish the portfolio project. Weekly practice with Maya helped me explain my reasoning, and asking for help became easier. Short runs, keeping my phone out of the bedroom, and Sunday walks with Leah made the weeks feel more manageable. I am still an early-career engineer looking for the right role, and I still get anxious before interviews. I don't need Eva to call me a transformed person. I want it to remember these concrete changes, notice setbacks without judging them, and help me choose a next step that leaves room for rest and relationships."
+    }
+  ],
+  "prompts": [
+    "What changed in how I prepare for interviews this month? Please use specific memories.",
+    "How did the first mock interview with Maya go, and what did we decide afterward?",
+    "Using How to Live on 24 Hours a Day from my library, suggest a small evening routine for interview preparation that also protects my sleep and time with Leah. Cite the passages you use.",
+    "Using Meditations from my library, help me think about what is within my control before tomorrow's interview. Connect it to what you know about my recent practice, and cite your sources."
+  ]
+}

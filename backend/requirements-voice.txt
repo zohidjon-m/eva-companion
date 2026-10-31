@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Eva backend — VOICE dependencies (optional; install on top of requirements.txt).
 #
 #     pip install -r requirements-voice.txt

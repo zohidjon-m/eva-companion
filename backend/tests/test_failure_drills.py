@@ -20,8 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import demo_drills  # noqa: E402
 
 
-def test_all_failure_drills_pass():
+def test_all_failure_drills_pass(monkeypatch):
     """Every automated failure drill must report a soft, graceful outcome."""
+    import app as app_mod
+
+    def unexpected_start():
+        """Fail the drill if it attempts to launch an actual model subprocess."""
+        raise AssertionError("Failure drills must not start a real model server")
+
+    monkeypatch.setattr(app_mod._llama, "start", unexpected_start)
     saved = os.environ.get("EVA_VAULT_DIR")
     try:
         results = demo_drills.run_all()

@@ -17,6 +17,25 @@ import pytest
 import scheduler as sched
 
 
+@pytest.mark.parametrize("override, expected", [("0", False), ("1", True)])
+def test_scheduler_explicit_override_with_model_autostart(monkeypatch, override, expected):
+    """Allow controlled fixtures to pause consolidation while the backend owns the model."""
+    from app import _scheduler_autostart
+
+    monkeypatch.setenv("EVA_START_LLAMA", "1")
+    monkeypatch.setenv("EVA_START_SCHEDULER", override)
+    assert _scheduler_autostart() is expected
+
+
+def test_scheduler_defaults_to_model_autostart(monkeypatch):
+    """Preserve normal local-mode consolidation when no explicit override is set."""
+    from app import _scheduler_autostart
+
+    monkeypatch.delenv("EVA_START_SCHEDULER", raising=False)
+    monkeypatch.setenv("EVA_START_LLAMA", "1")
+    assert _scheduler_autostart() is True
+
+
 @pytest.fixture()
 def vault_env(tmp_path, monkeypatch):
     """A temp vault so the scheduler's state file is isolated per test."""

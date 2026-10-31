@@ -251,6 +251,20 @@
   gap: var(--space-4);
   align-items: start;
 }
+.graph__scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.graph__scope .insights__note {
+  margin: 0;
+}
+.graph__svg--recurring .graph__node-label {
+  font-size: 16px;
+}
 @media (max-width: 880px) {
   .graph {
     grid-template-columns: 1fr;

@@ -19,16 +19,19 @@ $LlamaDir = Join-Path $Root "bin\llama.cpp\windows"
 $LlamaExe = Join-Path $LlamaDir "llama-server.exe"
 
 function Say($Message) {
+  <# Print setup progress so a long first-run download is visible. #>
   Write-Host "[setup-windows] $Message"
 }
 
 function Ensure-Dir($Path) {
+  <# Create an asset directory only when it is missing. #>
   if (!(Test-Path $Path)) {
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
   }
 }
 
 function Assert-FreeSpace($Path, [Int64]$RequiredBytes) {
+  <# Reject a model download before it can exhaust the destination drive. #>
   Ensure-Dir $Path
   $drive = Get-PSDrive -Name ([System.IO.Path]::GetPathRoot((Resolve-Path $Path)).Substring(0,1))
   if ($drive.Free -lt $RequiredBytes) {
@@ -43,6 +46,12 @@ Ensure-Dir $LlamaDir
 if (!(Test-Path $LlamaExe) -or $Force) {
   Say "Downloading latest llama.cpp Windows CPU release."
   $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+  # Stable releases can point to a binary build through nightly-tag.txt.
+  $Pointer = $Release.assets | Where-Object { $_.name -eq "nightly-tag.txt" } | Select-Object -First 1
+  if ($Pointer) {
+    $Tag = (Invoke-RestMethod -Uri $Pointer.browser_download_url).Trim()
+    $Release = Invoke-RestMethod -Uri ("https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/" + [Uri]::EscapeDataString($Tag))
+  }
   $Asset = $Release.assets |
     Where-Object { $_.name -match "win" -and $_.name -match "x64" -and $_.name -match "cpu" -and $_.name -match "\.zip$" } |
     Select-Object -First 1
@@ -50,15 +59,23 @@ if (!(Test-Path $LlamaExe) -or $Force) {
     throw "Could not find a Windows x64 CPU llama.cpp release asset."
   }
   $Zip = Join-Path $LlamaDir $Asset.name
-  $Extract = Join-Path $LlamaDir "extract"
+  $Extract = Join-Path $LlamaDir ("extract-" + [guid]::NewGuid().ToString("N"))
   Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Zip -UseBasicParsing
-  if (Test-Path $Extract) { Remove-Item -Recurse -Force $Extract }
   Expand-Archive -Force $Zip $Extract
   $Found = Get-ChildItem -Path $Extract -Recurse -Filter "llama-server.exe" | Select-Object -First 1
   if ($null -eq $Found) {
     throw "Downloaded llama.cpp archive did not contain llama-server.exe."
   }
-  Copy-Item -Force $Found.FullName $LlamaExe
+  # Modern llama.cpp builds need their sibling GGML/backend DLLs, not just the EXE.
+  Get-ChildItem -LiteralPath $Found.DirectoryName -File |
+    Where-Object { $_.Extension -eq ".dll" -or $_.Name -eq "llama-server.exe" } |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $LlamaDir -Force }
+  $ResolvedRoot = [IO.Path]::GetFullPath($LlamaDir).TrimEnd('\') + '\'
+  $ResolvedExtract = [IO.Path]::GetFullPath($Extract)
+  if (!$ResolvedExtract.StartsWith($ResolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove an extraction folder outside the llama.cpp directory."
+  }
+  Remove-Item -LiteralPath $ResolvedExtract -Recurse -Force
   Say "Installed llama-server.exe at $LlamaExe"
 } else {
   Say "Found llama-server.exe at $LlamaExe"

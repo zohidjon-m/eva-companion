@@ -144,7 +144,7 @@ def resolve_llama_server() -> str | None:
 
 
 def llama_profile() -> str:
-    """Return the llama.cpp launch profile for the current host."""
+    """Choose a host default, allowing an explicit CUDA profile on NVIDIA PCs."""
     override = os.environ.get("EVA_LLAMA_PROFILE")
     if override:
         return override
@@ -158,12 +158,12 @@ def llama_profile() -> str:
 def binary_command(binary: str, *, profile: str | None = None) -> list[str]:
     """Build the native ``llama-server`` argv.
 
-    Full Metal offload, 8192 context and a q8_0 KV cache. ``--jinja`` makes the
+    GPU profiles use full offload, 8192 context and a q8_0 KV cache. ``--jinja`` makes the
     server apply the GGUF's embedded gemma-4 chat template for
     ``/v1/chat/completions``; without it the binary would use a plain prompt format.
     """
     selected = profile or llama_profile()
-    if selected != "mac-metal":
+    if selected not in {"mac-metal", "win-cuda"}:
         return [
             binary,
             "--model", str(configured_model_path()),
@@ -177,7 +177,7 @@ def binary_command(binary: str, *, profile: str | None = None) -> list[str]:
     return [
         binary,
         "--model", str(configured_model_path()),
-        "--n-gpu-layers", "-1",        # offload ALL layers to the Metal GPU
+        "--n-gpu-layers", "-1",        # offload ALL layers to the selected GPU
         "--ctx-size", str(N_CTX),
         "--cache-type-k", "q8_0",      # q8_0 key cache
         "--cache-type-v", "q8_0",      # q8_0 value cache

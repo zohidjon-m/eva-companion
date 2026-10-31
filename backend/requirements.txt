@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Eva backend dependencies — CORE (text chat, journaling, memory, insights).
 #
 # Voice (STT/TTS) deps are split out into requirements-voice.txt because Kokoro

@@ -1,0 +1,729 @@
+{
+  "schema_version": 1,
+  "fictional": true,
+  "recorded_on": "2026-10-31",
+  "base_date": "2026-10-31",
+  "persona": "Alex Morgan",
+  "fixture": "scripts/fixtures/showcase_alex.json",
+  "fixture_sha256": "861352bce22f5f17418201e4f458ab456193cd7d502cabad810cd002acb0f49a",
+  "method": "Authored fictional journal text; actual local Gemma extraction and nightly profile operations; no hand-authored extractions, profile claims, moods, or graph outputs.",
+  "environment": {
+    "os": "Windows 11",
+    "python": "3.11.9",
+    "ram_gb": 32,
+    "gpu": "NVIDIA GeForce RTX 5070 (12 GB)",
+    "llm_provider": "local_llamacpp",
+    "model": "gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf",
+    "llama_cpp_build": "b11960",
+    "runtime": "Windows x64 CUDA 13.4",
+    "launch_profile": "win-cuda",
+    "context_size": 8192,
+    "reasoning": "off"
+  },
+  "books": [
+    {
+      "title": "Meditations",
+      "author": "Marcus Aurelius",
+      "source": "https://www.gutenberg.org/ebooks/2680",
+      "indexed_passages": 222
+    },
+    {
+      "title": "How to Live on 24 Hours a Day",
+      "author": "Arnold Bennett",
+      "source": "https://www.gutenberg.org/ebooks/2274",
+      "indexed_passages": 47
+    }
+  ],
+  "stages": [
+    {
+      "stage": "baseline",
+      "extraction_counts": {
+        "done": 6
+      },
+      "graph_nodes": 46,
+      "graph_edges": 280,
+      "goals": [
+        {
+          "id": "g-4bc95e13-93a5-4926-bb6e-578fd279780f",
+          "text": "Practice interviews three evenings a week",
+          "status": "active",
+          "confidence": 0.1,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b"
+          ]
+        },
+        {
+          "id": "g-4e3866ea-ef9b-4a23-809e-8e5f9a527024",
+          "text": "Run twice a week",
+          "status": "active",
+          "confidence": 0.4,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b"
+          ]
+        },
+        {
+          "id": "g-fe0e1941-0eba-4d2b-b56d-98d874c8446b",
+          "text": "Stop the habit of checking job boards in bed",
+          "status": "active",
+          "confidence": 0.4,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b"
+          ]
+        },
+        {
+          "id": "g-dbd80eee-43f0-4928-8d01-a474a45f0099",
+          "text": "Ask Maya for a mock interview this week",
+          "status": "active",
+          "confidence": 0.56,
+          "evidence": [
+            "452d22ed-bce1-49f2-b5a6-c8f3a75a298e",
+            "da6ff57e-35d9-42de-97a4-fe4fa0486d5d"
+          ]
+        }
+      ],
+      "principles": [],
+      "principle_provenance": {},
+      "typical_mood": -1,
+      "resolved_open_loops": [],
+      "nightly_reports": [
+        {
+          "key": "introduction",
+          "entry_id": "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+          "date": "2026-09-27",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 3,
+            "l3_strengthened": 0,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "late-night-search",
+          "entry_id": "5e8b287f-e7f3-44fc-879b-a2a8213cb297",
+          "date": "2026-09-29",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 0,
+            "l3_weakened": 1,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "first-practice",
+          "entry_id": "452d22ed-bce1-49f2-b5a6-c8f3a75a298e",
+          "date": "2026-10-01",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 2,
+            "l3_strengthened": 0,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "reading-start",
+          "entry_id": "8ba752ff-66da-43c3-b7df-d2754b689cfe",
+          "date": "2026-10-03",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 1,
+            "l3_strengthened": 0,
+            "l3_weakened": 1,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "missed-run",
+          "entry_id": "da6ff57e-35d9-42de-97a4-fe4fa0486d5d",
+          "date": "2026-10-05",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 0,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 1,
+            "l3_weakened": 1,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "accept-help",
+          "entry_id": "81f38270-08f8-4269-b504-4813c37d96ff",
+          "date": "2026-10-07",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 0,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        }
+      ]
+    },
+    {
+      "stage": "adjustment",
+      "extraction_counts": {
+        "done": 12
+      },
+      "graph_nodes": 75,
+      "graph_edges": 320,
+      "goals": [
+        {
+          "id": "g-4bc95e13-93a5-4926-bb6e-578fd279780f",
+          "text": "Practice interviews three evenings a week",
+          "status": "active",
+          "confidence": 0.22,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+            "07b402c9-a110-4e07-9bee-274d4894257b",
+            "424060c2-7edb-466b-97ee-36ac9424f3dd"
+          ]
+        },
+        {
+          "id": "g-4e3866ea-ef9b-4a23-809e-8e5f9a527024",
+          "text": "Run twice a week",
+          "status": "active",
+          "confidence": 0.4,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+            "721d9681-176e-4c45-8267-09489ab97839"
+          ]
+        },
+        {
+          "id": "g-fe0e1941-0eba-4d2b-b56d-98d874c8446b",
+          "text": "Stop the habit of checking job boards in bed",
+          "status": "active",
+          "confidence": 0.28,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b"
+          ]
+        },
+        {
+          "id": "g-dbd80eee-43f0-4928-8d01-a474a45f0099",
+          "text": "Ask Maya for a mock interview this week",
+          "status": "active",
+          "confidence": 0.58,
+          "evidence": [
+            "452d22ed-bce1-49f2-b5a6-c8f3a75a298e",
+            "da6ff57e-35d9-42de-97a4-fe4fa0486d5d",
+            "721d9681-176e-4c45-8267-09489ab97839",
+            "b5142258-cca2-4b08-a452-d2d2fc3d98a0"
+          ]
+        }
+      ],
+      "principles": [
+        "Prioritize relationships alongside engineering goals"
+      ],
+      "principle_provenance": {
+        "evidence": [
+          "05e994e7-af95-490b-87ed-2667e749a07e"
+        ],
+        "source": "model",
+        "last_seen": "2026-10-15"
+      },
+      "typical_mood": 1,
+      "resolved_open_loops": [
+        {
+          "id": "loop-dfb850bc-75fe-4cec-9d6b-289bf0f3e78a",
+          "description": "did not reply to Maya's offer to practice",
+          "status": "resolved",
+          "opened": "2026-09-27",
+          "last_updated": "2026-10-09",
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+            "452d22ed-bce1-49f2-b5a6-c8f3a75a298e",
+            "da6ff57e-35d9-42de-97a4-fe4fa0486d5d",
+            "07b402c9-a110-4e07-9bee-274d4894257b"
+          ]
+        }
+      ],
+      "nightly_reports": [
+        {
+          "key": "first-mock",
+          "entry_id": "07b402c9-a110-4e07-9bee-274d4894257b",
+          "date": "2026-10-09",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 0,
+            "loops_resolved": 1,
+            "l3_added": 0,
+            "l3_strengthened": 2,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "small-routine",
+          "entry_id": "424060c2-7edb-466b-97ee-36ac9424f3dd",
+          "date": "2026-10-11",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 2,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "setback",
+          "entry_id": "95c2bf26-13ed-436e-92c9-77488a7a34ce",
+          "date": "2026-10-13",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 0,
+            "l3_weakened": 1,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "family-walk",
+          "entry_id": "05e994e7-af95-490b-87ed-2667e749a07e",
+          "date": "2026-10-15",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 0,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "project-review",
+          "entry_id": "721d9681-176e-4c45-8267-09489ab97839",
+          "date": "2026-10-17",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 1,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "weekly-mock",
+          "entry_id": "b5142258-cca2-4b08-a452-d2d2fc3d98a0",
+          "date": "2026-10-19",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 0,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 1,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        }
+      ]
+    },
+    {
+      "stage": "current",
+      "extraction_counts": {
+        "done": 18
+      },
+      "graph_nodes": 106,
+      "graph_edges": 320,
+      "goals": [
+        {
+          "id": "g-4bc95e13-93a5-4926-bb6e-578fd279780f",
+          "text": "Practice interviews three evenings a week",
+          "status": "active",
+          "confidence": 0.34,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+            "07b402c9-a110-4e07-9bee-274d4894257b",
+            "424060c2-7edb-466b-97ee-36ac9424f3dd",
+            "dabeba4c-7898-444e-a854-8c25ec6af058",
+            "ed317852-7259-4a73-b7a7-4b7498978dbb"
+          ]
+        },
+        {
+          "id": "g-4e3866ea-ef9b-4a23-809e-8e5f9a527024",
+          "text": "Run twice a week",
+          "status": "active",
+          "confidence": 0.29,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+            "721d9681-176e-4c45-8267-09489ab97839"
+          ]
+        },
+        {
+          "id": "g-fe0e1941-0eba-4d2b-b56d-98d874c8446b",
+          "text": "Stop the habit of checking job boards in bed",
+          "status": "achieved",
+          "confidence": 0.21,
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+            "ee2b143f-263c-4c99-9a70-1a7303755c80",
+            "00b4594c-b340-4a4f-a0e2-7d7a3bbd99bd"
+          ]
+        },
+        {
+          "id": "g-dbd80eee-43f0-4928-8d01-a474a45f0099",
+          "text": "Ask Maya for a mock interview this week",
+          "status": "active",
+          "confidence": 0.49,
+          "evidence": [
+            "452d22ed-bce1-49f2-b5a6-c8f3a75a298e",
+            "da6ff57e-35d9-42de-97a4-fe4fa0486d5d",
+            "721d9681-176e-4c45-8267-09489ab97839",
+            "b5142258-cca2-4b08-a452-d2d2fc3d98a0",
+            "b99a40c9-61bb-497a-8542-6db50bb359f2"
+          ]
+        }
+      ],
+      "principles": [
+        "Prioritize relationships alongside engineering goals"
+      ],
+      "principle_provenance": {
+        "evidence": [
+          "05e994e7-af95-490b-87ed-2667e749a07e"
+        ],
+        "source": "model",
+        "last_seen": "2026-10-15"
+      },
+      "typical_mood": 1,
+      "resolved_open_loops": [
+        {
+          "id": "loop-dfb850bc-75fe-4cec-9d6b-289bf0f3e78a",
+          "description": "did not reply to Maya's offer to practice",
+          "status": "resolved",
+          "opened": "2026-09-27",
+          "last_updated": "2026-10-09",
+          "evidence": [
+            "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b",
+            "452d22ed-bce1-49f2-b5a6-c8f3a75a298e",
+            "da6ff57e-35d9-42de-97a4-fe4fa0486d5d",
+            "07b402c9-a110-4e07-9bee-274d4894257b"
+          ]
+        },
+        {
+          "id": "loop-24f37788-c3a6-4727-919d-f79c5d944527",
+          "description": "needs to change preparation habits to avoid being seen learning",
+          "status": "resolved",
+          "opened": "2026-10-01",
+          "last_updated": "2026-10-23",
+          "evidence": [
+            "452d22ed-bce1-49f2-b5a6-c8f3a75a298e",
+            "6c4b32dc-277b-41e0-a345-9ceb8deaa945"
+          ]
+        },
+        {
+          "id": "loop-11a693f3-0ad1-4679-84b9-74c4086c0b4e",
+          "description": "whether they will attend Saturday's practice",
+          "status": "resolved",
+          "opened": "2026-10-07",
+          "last_updated": "2026-10-23",
+          "evidence": [
+            "81f38270-08f8-4269-b504-4813c37d96ff",
+            "6c4b32dc-277b-41e0-a345-9ceb8deaa945"
+          ]
+        },
+        {
+          "id": "loop-53c9c3c9-1a7d-4888-9065-58439f7b35c1",
+          "description": "wants to manage self comparison after rejection",
+          "status": "resolved",
+          "opened": "2026-10-13",
+          "last_updated": "2026-10-23",
+          "evidence": [
+            "95c2bf26-13ed-436e-92c9-77488a7a34ce",
+            "6c4b32dc-277b-41e0-a345-9ceb8deaa945"
+          ]
+        },
+        {
+          "id": "loop-8205fa23-5d6e-4ce3-844c-2705af8ac41d",
+          "description": "needs to balance relationships and engineering goals",
+          "status": "resolved",
+          "opened": "2026-10-15",
+          "last_updated": "2026-10-23",
+          "evidence": [
+            "05e994e7-af95-490b-87ed-2667e749a07e",
+            "6c4b32dc-277b-41e0-a345-9ceb8deaa945"
+          ]
+        },
+        {
+          "id": "loop-30cff392-54a7-4d84-a94a-e50534639d10",
+          "description": "needs to practice explaining project decisions",
+          "status": "resolved",
+          "opened": "2026-10-21",
+          "last_updated": "2026-10-23",
+          "evidence": [
+            "ee2b143f-263c-4c99-9a70-1a7303755c80",
+            "6c4b32dc-277b-41e0-a345-9ceb8deaa945"
+          ]
+        }
+      ],
+      "nightly_reports": [
+        {
+          "key": "project-shipped",
+          "entry_id": "ee2b143f-263c-4c99-9a70-1a7303755c80",
+          "date": "2026-10-21",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 1,
+            "l3_added": 0,
+            "l3_strengthened": 0,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "protect-rest",
+          "entry_id": "6c4b32dc-277b-41e0-a345-9ceb8deaa945",
+          "date": "2026-10-23",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 5,
+            "l3_added": 0,
+            "l3_strengthened": 1,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "interview-booked",
+          "entry_id": "b99a40c9-61bb-497a-8542-6db50bb359f2",
+          "date": "2026-10-25",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 0,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "not-linear",
+          "entry_id": "dabeba4c-7898-444e-a854-8c25ec6af058",
+          "date": "2026-10-27",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 1,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "walkthrough-ready",
+          "entry_id": "00b4594c-b340-4a4f-a0e2-7d7a3bbd99bd",
+          "date": "2026-10-29",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 0,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 0,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        },
+        {
+          "key": "reflection",
+          "entry_id": "ed317852-7259-4a73-b7a7-4b7498978dbb",
+          "date": "2026-10-30",
+          "nightly": {
+            "entries": 1,
+            "loops_opened": 1,
+            "loops_resolved": 0,
+            "l3_added": 0,
+            "l3_strengthened": 2,
+            "l3_weakened": 0,
+            "claims_revalidated": 0,
+            "claims_cleared": 0,
+            "claims_decayed": 0
+          }
+        }
+      ]
+    }
+  ],
+  "source_entries": [
+    {
+      "key": "introduction",
+      "title": "A smaller plan for a difficult month",
+      "date": "2026-09-27",
+      "entry_id": "7e76a6e3-11d1-468c-9a26-6a5f9a1ea11b"
+    },
+    {
+      "key": "late-night-search",
+      "title": "The job boards took the whole evening",
+      "date": "2026-09-29",
+      "entry_id": "5e8b287f-e7f3-44fc-879b-a2a8213cb297"
+    },
+    {
+      "key": "first-practice",
+      "title": "Knowing the code and explaining it are different",
+      "date": "2026-10-01",
+      "entry_id": "452d22ed-bce1-49f2-b5a6-c8f3a75a298e"
+    },
+    {
+      "key": "reading-start",
+      "title": "Reading before another tutorial",
+      "date": "2026-10-03",
+      "entry_id": "8ba752ff-66da-43c3-b7df-d2754b689cfe"
+    },
+    {
+      "key": "missed-run",
+      "title": "Another promise I made too large",
+      "date": "2026-10-05",
+      "entry_id": "da6ff57e-35d9-42de-97a4-fe4fa0486d5d"
+    },
+    {
+      "key": "accept-help",
+      "title": "I finally replied to Maya",
+      "date": "2026-10-07",
+      "entry_id": "81f38270-08f8-4269-b504-4813c37d96ff"
+    },
+    {
+      "key": "first-mock",
+      "title": "The mock interview happened",
+      "date": "2026-10-09",
+      "entry_id": "07b402c9-a110-4e07-9bee-274d4894257b"
+    },
+    {
+      "key": "small-routine",
+      "title": "A short run and one finished task",
+      "date": "2026-10-11",
+      "entry_id": "424060c2-7edb-466b-97ee-36ac9424f3dd"
+    },
+    {
+      "key": "setback",
+      "title": "A rejection and an old habit",
+      "date": "2026-10-13",
+      "entry_id": "95c2bf26-13ed-436e-92c9-77488a7a34ce"
+    },
+    {
+      "key": "family-walk",
+      "title": "An afternoon that did not need to be productive",
+      "date": "2026-10-15",
+      "entry_id": "05e994e7-af95-490b-87ed-2667e749a07e"
+    },
+    {
+      "key": "project-review",
+      "title": "Showing the unfinished project",
+      "date": "2026-10-17",
+      "entry_id": "721d9681-176e-4c45-8267-09489ab97839"
+    },
+    {
+      "key": "weekly-mock",
+      "title": "Practice started to feel ordinary",
+      "date": "2026-10-19",
+      "entry_id": "b5142258-cca2-4b08-a452-d2d2fc3d98a0"
+    },
+    {
+      "key": "project-shipped",
+      "title": "The portfolio project is published",
+      "date": "2026-10-21",
+      "entry_id": "ee2b143f-263c-4c99-9a70-1a7303755c80"
+    },
+    {
+      "key": "protect-rest",
+      "title": "Rest is part of the plan",
+      "date": "2026-10-23",
+      "entry_id": "6c4b32dc-277b-41e0-a345-9ceb8deaa945"
+    },
+    {
+      "key": "interview-booked",
+      "title": "A real interview is on the calendar",
+      "date": "2026-10-25",
+      "entry_id": "b99a40c9-61bb-497a-8542-6db50bb359f2"
+    },
+    {
+      "key": "not-linear",
+      "title": "A difficult day did not erase the month",
+      "date": "2026-10-27",
+      "entry_id": "dabeba4c-7898-444e-a854-8c25ec6af058"
+    },
+    {
+      "key": "walkthrough-ready",
+      "title": "The walkthrough is ready",
+      "date": "2026-10-29",
+      "entry_id": "00b4594c-b340-4a4f-a0e2-7d7a3bbd99bd"
+    },
+    {
+      "key": "reflection",
+      "title": "What actually changed",
+      "date": "2026-10-30",
+      "entry_id": "ed317852-7259-4a73-b7a7-4b7498978dbb"
+    }
+  ],
+  "verification": {
+    "backend_tests_passed": 433,
+    "backend_test_duration_seconds": 15.03,
+    "frontend_production_build": "passed",
+    "native_windows_build": "passed",
+    "offline_speech_roundtrip": {
+      "input": "A small step and a good night of sleep can help me prepare for my interview.",
+      "transcription": "A small step and a good night of sleep can help me prepare for my interview.",
+      "model_size": "base.en",
+      "audio_duration_seconds": 4.7,
+      "network_guard_violations": 0
+    }
+  },
+  "scope_notes": [
+    "This is a staged fictional timeline, not a real user study.",
+    "The native Windows app was built and started; screenshots capture its React frontend through a browser at the configured 1100x760 desktop size.",
+    "The 8 GB Apple Silicon target was not benchmarked by this run.",
+    "Confidence values are deterministic application heuristics, not calibrated probabilities."
+  ]
+}

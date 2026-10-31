@@ -41,17 +41,23 @@ export function GraphView() {
   const [selection, setSelection] = useState<Selection>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [confirmed, setConfirmed] = useState<Set<string>>(new Set());
+  const [recurringOnly, setRecurringOnly] = useState(false);
 
   const nodeById = useMemo(
     () => new Map(graph.nodes.map((n) => [n.id, n])),
     [graph.nodes],
   );
+  const visibleNodes = useMemo(
+    () => recurringOnly ? graph.nodes.filter((n) => n.entry_count >= 2) : graph.nodes,
+    [graph.nodes, recurringOnly],
+  );
+  const visibleIds = useMemo(() => new Set(visibleNodes.map((n) => n.id)), [visibleNodes]);
   const visibleEdges = useMemo(
-    () => graph.edges.filter((e) => !dismissed.has(e.id)),
-    [graph.edges, dismissed],
+    () => graph.edges.filter((e) => !dismissed.has(e.id) && visibleIds.has(e.source) && visibleIds.has(e.target)),
+    [graph.edges, dismissed, visibleIds],
   );
 
-  const { svgRef, positions, startDrag } = useGraphLayout(graph.nodes, visibleEdges);
+  const { svgRef, positions, startDrag } = useGraphLayout(visibleNodes, visibleEdges);
 
   const selectedNode =
     selection?.kind === "node" ? nodeById.get(selection.id) ?? null : null;
@@ -102,11 +108,31 @@ export function GraphView() {
           description="As you write, Eva starts to see how your themes, people, and feelings connect. After a few weeks there's a web here to explore."
         />
       ) : (
+        <>
+          <div className="graph__scope">
+            <div className="seg" role="group" aria-label="Graph scope">
+              <button className={`seg__btn${!recurringOnly ? " seg__btn--on" : ""}`} aria-pressed={!recurringOnly}
+                onClick={() => { setSelection(null); setRecurringOnly(false); }}>
+                All connections
+              </button>
+              <button className={`seg__btn${recurringOnly ? " seg__btn--on" : ""}`} aria-pressed={recurringOnly}
+                onClick={() => { setSelection(null); setRecurringOnly(true); }}>
+                Recurring topics
+              </button>
+            </div>
+            <p className="insights__note" aria-live="polite">
+              {visibleNodes.length} of {graph.nodes.length} topics shown
+              {recurringOnly && " · present in at least two entries"}
+            </p>
+          </div>
+          {recurringOnly && visibleNodes.length === 0 && (
+            <p className="insights__note">No recurring topics yet. All connections still shows every topic.</p>
+          )}
         <div className="graph">
           <div className="graph__canvas">
             <svg
               ref={svgRef}
-              className="graph__svg"
+              className={`graph__svg${recurringOnly ? " graph__svg--recurring" : ""}`}
               viewBox={`0 0 ${VB_W} ${VB_H}`}
               role="img"
               aria-label="Knowledge graph of your themes, people and feelings"
@@ -173,7 +199,7 @@ export function GraphView() {
               })}
 
               {/* Nodes. */}
-              {graph.nodes.map((n) => {
+              {visibleNodes.map((n) => {
                 const p = positions.get(n.id);
                 if (!p) return null;
                 const r = nodeRadius(n);
@@ -216,6 +242,7 @@ export function GraphView() {
             onClear={() => setSelection(null)}
           />
         </div>
+        </>
       )}
     </section>
   );
