@@ -8,7 +8,7 @@ It runs a small language model locally by default, keeps your original writing
 in plain Markdown, and lets you correct the profile it builds about you.
 
 Built with **Tauri 2 · React · TypeScript · FastAPI · llama.cpp · SQLite · ChromaDB**.
-Designed for a **MacBook M1 Air with 8 GB RAM**, with optional online providers
+with optional online providers
 behind the same model interface.
 
 [Demo](#see-eva-in-action) · [Architecture](#architecture) · [Engineering decisions](#engineering-decisions) ·
